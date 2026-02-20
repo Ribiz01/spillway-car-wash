@@ -1,0 +1,158 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ----------------------------------------------------------------------
+    // Helper Functions
+    // ----------------------------------------------------------------------
+
+    /**
+     * Returns true if the user is authenticated.
+     */
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    /**
+     * Returns true if the authenticated user's UID matches the provided userId.
+     * Use this to verify a user owns a specific document or data tree.
+     */
+    function isOwner(userId) {
+      return request.auth.uid == userId;
+    }
+
+    /**
+     * Returns true if the document being accessed already exists in Firestore.
+     * CRITICAL: Always use this for update and delete operations.
+     */
+    function isExistingDoc() {
+      return resource != null;
+    }
+
+    /**
+     * Checks if the user is an admin by reading the 'role' field
+     * from their user profile document.
+     */
+    function isAdmin() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'Admin';
+    }
+
+    /**
+     * Returns true if the user is the original creator of a document
+     * or if the user is an admin.
+     */
+    function isCreatorOrAdmin(creatorId) {
+      return isOwner(creatorId) || isAdmin();
+    }
+    
+    /**
+     * Validates that the 'userId' field in a new document matches the
+     * authenticated user's UID. Enforces ownership on creation.
+     */
+    function isNewDocCreator(docData) {
+      return docData.userId == request.auth.uid;
+    }
+
+    /**
+     * Validates that the 'userId' field is immutable on update.
+     * Prevents re-assigning ownership of a document.
+     */
+    function isUserIdImmutable() {
+      return request.resource.data.userId == resource.data.userId;
+    }
+    
+    /**
+     * Checks if the requesting user is the owner of a given transaction or an admin.
+     * Requires a get() call, as security is derived from a related document.
+     */
+    function isTransactionOwnerOrAdmin(transactionId) {
+      let transaction = get(/databases/$(database)/documents/transactions/$(transactionId)).data;
+      return transaction.userId == request.auth.uid || isAdmin();
+    }
+
+    // ----------------------------------------------------------------------
+    // Collection Rules
+    // ----------------------------------------------------------------------
+
+    /**
+     * @description Users can create and manage their own profile document. Admins can list all users.
+     * @path /users/{userId}
+     * @allow (create) A new user with UID 'user123' creates their own profile at `/users/user123`.
+     * @deny (list) A non-admin user tries to list documents in the `/users` collection.
+     * @principle Restricts access to a user's own data tree and prevents user enumeration for non-admins.
+     */
+    match /users/{userId} {
+      allow get: if isOwner(userId) || isAdmin();
+      allow list: if isAdmin();
+      allow create: if isOwner(userId) || isAdmin();
+      allow update: if isOwner(userId) || isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    /**
+     * @description Any authenticated employee can add and view vehicles. Only admins can modify or delete vehicle records.
+     * @path /vehicles/{vehicleId}
+     * @allow (create) A signed-in attendant (non-admin) creates a new vehicle document.
+     * @deny (delete) A signed-in attendant (non-admin) tries to delete an existing vehicle document.
+     * @principle Allows broad creation/read access for employees while protecting data integrity via admin-only writes.
+     */
+    match /vehicles/{vehicleId} {
+      allow get, list: if isSignedIn();
+      allow create: if isSignedIn();
+      allow update, delete: if isAdmin() && isExistingDoc();
+    }
+
+    /**
+     * @description Service offerings are viewable by all employees but can only be created, updated, or deleted by admins.
+     * @path /services/{serviceId}
+     * @allow (list) A signed-in attendant (non-admin) lists all available services to create a transaction.
+     * @deny (create) A signed-in attendant (non-admin) tries to create a new service.
+     * @principle Public read for internal users, with controlled writes for administrators.
+     */
+    match /services/{serviceId} {
+      allow get, list: if isSignedIn();
+      allow create: if isAdmin();
+      allow update, delete: if isAdmin() && isExistingDoc();
+    }
+
+    /**
+     * @description Employees can create transactions they are responsible for. All employees can view transactions for operational purposes, but only the original creator or an admin can modify or delete them.
+     * @path /transactions/{transactionId}
+     * @allow (create) Attendant 'user123' creates a transaction, setting the `userId` field to 'user123'.
+     * @deny (update) Attendant 'user456' tries to update a transaction where the `userId` field is 'user123'.
+     * @principle Enforces document ownership for writes while allowing broader read access for business operations.
+     */
+    match /transactions/{transactionId} {
+      allow get, list: if isSignedIn();
+      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
+      allow update: if isExistingDoc() && isCreatorOrAdmin(resource.data.userId) && request.resource.data.userId == resource.data.userId;
+      allow delete: if isExistingDoc() && isCreatorOrAdmin(resource.data.userId);
+    }
+
+    /**
+     * @description Receipts are linked to transactions. Their security follows the parent transaction: an employee can manage receipts for transactions they created, and admins have full access.
+     * @path /receipts/{receiptId}
+     * @allow (create) Attendant 'user123' creates a receipt for a transaction that they also created.
+     * @deny (create) Attendant 'user456' tries to create a receipt for a transaction created by 'user123'.
+     * @principle Derives security from a related document using a `get()` call to check the parent transaction's ownership.
+     */
+    match /receipts/{receiptId} {
+      allow get, list: if isSignedIn();
+      allow create: if isSignedIn() && get(/databases/$(database)/documents/transactions/$(request.resource.data.transactionId)).data.userId == request.auth.uid || isAdmin();
+      allow update, delete: if isExistingDoc() && get(/databases/$(database)/documents/transactions/$(resource.data.transactionId)).data.userId == request.auth.uid || isAdmin();
+    }
+
+    /**
+     * @description Stores offline data synchronization status. Writes are currently disabled because the schema lacks an ownership field.
+     * @path /sync_status/{syncStatusId}
+     * @allow (get) An admin views a sync status document.
+     * @deny (create) Any non-admin user tries to create a sync status record.
+     * @principle Secures internal system data. Writes are disabled pending schema changes to enforce ownership.
+     */
+    match /sync_status/{syncStatusId} {
+      allow get, list: if isAdmin();
+      // CRITICAL: Cannot implement user-specific writes. The 'SyncStatus' entity is missing a 'userId' or 'ownerId' field.
+      allow create, update, delete: if false; // TODO: Add owner validation once the schema is updated with an ownership field.
+    }
+  }
+}
