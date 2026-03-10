@@ -18,13 +18,12 @@ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { useToast } from "@/hooks/use-toast";
-import type { Service, Vehicle, Transaction } from "@/lib/types";
+import type { Service, Vehicle, Transaction, UserProfile } from "@/lib/types";
 import { formatCurrency } from "@/lib/utils";
 import { Check, ChevronLeft, ChevronRight, Loader2, Sparkles, Wind, Droplets, Car, Camera, Image as ImageIcon, Disc, Star, Share2 } from "lucide-react";
 import { Checkbox } from "../ui/checkbox";
 import { VehicleCamera } from "./vehicle-camera";
 import { scanPlate } from "@/ai/flows/scan-plate-flow";
-import { generateReceiptPdf } from "@/lib/pdf-generator";
 
 const vehicleSchema = z.object({
   licensePlate: z.string().min(3, "License plate is required").toUpperCase(),
@@ -174,9 +173,9 @@ export function Workflow() {
     
     try {
         const docRef = await addDoc(collection(firestore, 'transactions'), newTransactionData);
-        const finalTransaction = { id: docRef.id, ...newTransactionData };
+        const finalTransaction: Transaction = { id: docRef.id, ...newTransactionData };
 
-        setTransaction(finalTransaction as Transaction);
+        setTransaction(finalTransaction);
         setStep("receipt");
 
         toast({
@@ -239,39 +238,30 @@ export function Workflow() {
     }
 };
 
-  const handleShareReceipt = async () => {
-    if (!transaction) return;
+const handleShareReceipt = async () => {
+    if (!transaction || !currentVehicle?.phoneNumber) return;
 
-    const pdfBlob = generateReceiptPdf(transaction, currentVehicle);
-    const pdfFile = new File([pdfBlob], `Spillway-Receipt-${transaction.licensePlate}.pdf`, { type: 'application/pdf' });
+    // 1. Generate the receipt text using WhatsApp formatting
+    const servicesText = transaction.services
+      .map(s => `- ${s.name}: ${formatCurrency(s.price)}`)
+      .join('\n');
 
-    // Use Web Share API if available, for a native sharing experience
-    if (navigator.canShare && navigator.canShare({ files: [pdfFile] })) {
-      try {
-        await navigator.share({
-          files: [pdfFile],
-          title: `Spillway Receipt: ${transaction.licensePlate}`,
-          text: `Your car wash receipt for vehicle ${transaction.licensePlate}.`,
-        });
-      } catch (error) {
-        // This error can happen if the user cancels the share dialog.
-        // We don't need to show an error toast in that case.
-        console.log('Could not share receipt:', error);
-      }
-    } else {
-      // Fallback for browsers that don't support sharing files (e.g., desktop browsers)
-      // or if sharing fails. This opens the PDF in a new tab.
-      try {
-        const fileURL = URL.createObjectURL(pdfBlob);
-        window.open(fileURL, '_blank');
-      } catch (error) {
-          toast({
-              title: "Failed to open PDF",
-              description: "Your browser might be blocking pop-ups, or another error occurred.",
-              variant: "destructive",
-          });
-      }
-    }
+    const receiptText = `*Spillway Car Wash & Grill*\n---------------------------\n*OFFICIAL RECEIPT*\n\nReceipt ID: ${transaction.id}\nDate: ${new Date(transaction.timestamp).toLocaleString()}\nLicense Plate: ${transaction.licensePlate}\n\n*Services:*\n${servicesText}\n\n---------------------------\n*TOTAL: ${formatCurrency(transaction.totalAmount)}*\nPayment Method: ${transaction.payment.method}\n---------------------------\n\nThank you for your business!`;
+
+    // 2. URL-encode the text
+    const encodedText = encodeURIComponent(receiptText);
+
+    // 3. Create the WhatsApp URL
+    const phoneNumber = currentVehicle.phoneNumber.replace(/[+\s]/g, '');
+    const whatsappUrl = `https://wa.me/${phoneNumber}?text=${encodedText}`;
+    
+    // 4. Open the URL in a new tab
+    window.open(whatsappUrl, '_blank');
+
+    toast({
+        title: "Redirecting to WhatsApp",
+        description: "Your receipt has been prepared. Please press 'Send' in WhatsApp.",
+    });
   };
 
   const startNew = () => {
@@ -563,9 +553,19 @@ export function Workflow() {
                 </CardContent>
                 <CardFooter className="flex flex-col gap-2">
                     {transaction && (
-                        <Button className="w-full" variant="outline" onClick={handleShareReceipt}>
-                            <Share2 className="mr-2" /> Share / View PDF
+                        <Button 
+                            className="w-full" 
+                            variant="outline" 
+                            onClick={handleShareReceipt}
+                            disabled={!currentVehicle?.phoneNumber}
+                        >
+                            <Share2 className="mr-2" /> Share to WhatsApp
                         </Button>
+                    )}
+                    {!currentVehicle?.phoneNumber && transaction && (
+                        <p className="text-xs text-muted-foreground text-center px-4">
+                            Add a phone number to the vehicle to enable WhatsApp sharing.
+                        </p>
                     )}
                     <Button className="w-full" onClick={startNew}>Start New Wash <ChevronRight className="ml-2" /></Button>
                 </CardFooter>
@@ -590,8 +590,7 @@ export function Workflow() {
   );
 }
 
+    
 
-
-
-
+    
 
