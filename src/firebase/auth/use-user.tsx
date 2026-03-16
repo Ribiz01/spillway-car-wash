@@ -6,7 +6,6 @@ import { onAuthStateChanged, signInWithEmailAndPassword, signOut, User } from 'f
 import { doc, getDoc, Firestore } from 'firebase/firestore';
 import { useAuth, useFirestore } from '@/firebase/provider';
 import type { AppUser, UserProfile } from '@/lib/types';
-import { FirebaseErrorListener } from '@/components/FirebaseErrorListener';
 
 interface UserContextType {
     user: AppUser | null;
@@ -21,7 +20,6 @@ export const UserProvider = ({ children }: { children: React.ReactNode }) => {
     const userProviderValue = useUserProvider();
     return (
         <UserContext.Provider value={userProviderValue}>
-            <FirebaseErrorListener />
             {children}
         </UserContext.Provider>
     );
@@ -58,7 +56,7 @@ export const useUserProvider = (): UserContextType => {
                     const userProfile = userDoc.data() as UserProfile;
                     setUser({ ...firebaseUser, profile: userProfile });
                 } else {
-                    // Handle case where user exists in Auth but not Firestore
+                    // Handle case where user exists in Auth but not in Firestore
                     console.warn(`User with UID ${firebaseUser.uid} exists in Firebase Auth but not in Firestore 'users' collection. Logging out.`);
                     await signOut(auth);
                     setUser(null);

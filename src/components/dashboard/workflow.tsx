@@ -75,6 +75,7 @@ export function Workflow() {
   const [isScanning, setIsScanning] = useState(false);
   const [isFindingVehicle, setIsFindingVehicle] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isNewVehicleSaved, setIsNewVehicleSaved] = useState(false);
 
   const { user } = useUser();
   const firestore = useFirestore();
@@ -122,6 +123,7 @@ export function Workflow() {
         setStep("services");
       } else {
         newVehicleForm.setValue("licensePlate", data.licensePlate);
+        setIsNewVehicleSaved(false);
         setStep("new-vehicle");
       }
     } catch (error) {
@@ -140,7 +142,8 @@ export function Workflow() {
         await setDoc(vehicleRef, newVehicle);
         const savedVehicle = { id: data.licensePlate, ...newVehicle };
         setCurrentVehicle(savedVehicle);
-        setStep("services");
+        toast({ title: "Vehicle Registered", description: `${data.licensePlate} has been saved.` });
+        setIsNewVehicleSaved(true);
     } catch (error: any) {
         toast({ title: "Error", description: error.message || "Could not add vehicle.", variant: "destructive" });
     } finally {
@@ -158,7 +161,7 @@ export function Workflow() {
     const selectedServices = allServices.filter(s => selectedIds.includes(s.id));
     const totalAmount = selectedServices.reduce((acc, s) => acc + s.price, 0);
 
-    const newTransactionData = {
+    const newTransactionData: Omit<Transaction, 'id'> = {
       timestamp: new Date().toISOString(),
       licensePlate: currentVehicle.licensePlate,
       services: selectedServices.map(s => ({ id: s.id, name: s.name, price: s.price })),
@@ -169,6 +172,7 @@ export function Workflow() {
         amount: totalAmount,
       },
       userId: user.uid,
+      status: data.paymentMethod === 'Corporate Account' ? 'Pending Payment' : 'Completed',
     };
     
     try {
@@ -246,7 +250,7 @@ const handleShareReceipt = async () => {
       .map(s => `- ${s.name}: ${formatCurrency(s.price)}`)
       .join('\n');
 
-    const receiptText = `*Spillway Car Wash & Grill*\n---------------------------\n*OFFICIAL RECEIPT*\n\nReceipt ID: ${transaction.id}\nDate: ${new Date(transaction.timestamp).toLocaleString()}\nLicense Plate: ${transaction.licensePlate}\n\n*Services:*\n${servicesText}\n\n---------------------------\n*TOTAL: ${formatCurrency(transaction.totalAmount)}*\nPayment Method: ${transaction.payment.method}\n---------------------------\n\nThank you for your business!`;
+    const receiptText = `*Spillway Car Wash & Grill*\n---------------------------\n*OFFICIAL RECEIPT*\n\nReceipt ID: ${transaction.id}\nDate: ${new Date(transaction.timestamp).toLocaleString()}\nLicense Plate: ${transaction.licensePlate}\n\n*Services:*\n${servicesText}\n\n---------------------------\n*TOTAL: ${formatCurrency(transaction.totalAmount)}*\nPayment Method: ${transaction.payment.method}\nStatus: ${transaction.status}\n---------------------------\n\nThank you for your business!`;
 
     // 2. URL-encode the text
     const encodedText = encodeURIComponent(receiptText);
@@ -272,6 +276,7 @@ const handleShareReceipt = async () => {
     setCurrentVehicle(null);
     setTransaction(null);
     setVehiclePhotoUri(null);
+    setIsNewVehicleSaved(false);
     setStep("vehicle");
   };
   
@@ -362,7 +367,8 @@ const handleShareReceipt = async () => {
                               <Button type="button" variant="outline" className="w-full" onClick={() => {
                                   setCameraMode('capture');
                                   setIsCameraOpen(true);
-                              }}>
+                              }}
+                              disabled={isSubmitting || isNewVehicleSaved}>
                                   <Camera className="mr-2" /> {vehiclePhotoUri ? 'Retake' : 'Capture'} Photo
                               </Button>
                           </CardFooter>
@@ -375,7 +381,7 @@ const handleShareReceipt = async () => {
                   <FormField control={newVehicleForm.control} name="type" render={({ field }) => (
                     <FormItem>
                       <FormLabel>Vehicle Type</FormLabel>
-                      <Select onValueChange={field.onChange} defaultValue={field.value}>
+                      <Select onValueChange={field.onChange} defaultValue={field.value} disabled={isSubmitting || isNewVehicleSaved}>
                         <FormControl><SelectTrigger><SelectValue placeholder="Select vehicle type" /></SelectTrigger></FormControl>
                         <SelectContent>
                           <SelectItem value="Sedan">Sedan</SelectItem>
@@ -388,17 +394,25 @@ const handleShareReceipt = async () => {
                     </FormItem>
                   )}/>
                   <FormField control={newVehicleForm.control} name="ownerName" render={({ field }) => (
-                    <FormItem><FormLabel>Owner Name (Optional)</FormLabel><FormControl><Input placeholder="John Doe" {...field} /></FormControl><FormMessage /></FormItem>
+                    <FormItem><FormLabel>Owner Name (Optional)</FormLabel><FormControl><Input placeholder="John Doe" {...field} disabled={isSubmitting || isNewVehicleSaved}/></FormControl><FormMessage /></FormItem>
                   )}/>
                    <FormField control={newVehicleForm.control} name="phoneNumber" render={({ field }) => (
-                    <FormItem><FormLabel>Phone Number (for WhatsApp)</FormLabel><FormControl><Input placeholder="260977123456" {...field} /></FormControl><FormMessage /></FormItem>
+                    <FormItem><FormLabel>Phone Number (for WhatsApp)</FormLabel><FormControl><Input placeholder="260977123456" {...field} disabled={isSubmitting || isNewVehicleSaved} /></FormControl><FormMessage /></FormItem>
                   )}/>
                   <div className="flex gap-2">
-                    <Button type="button" variant="outline" onClick={() => setStep("vehicle")}><ChevronLeft className="mr-2" />Back</Button>
-                    <Button type="submit" disabled={isSubmitting}>
-                      {isSubmitting && <Loader2 className="mr-2 animate-spin" />}
-                      Register and Continue <ChevronRight className="ml-2" />
+                    <Button type="button" variant="outline" onClick={() => setStep("vehicle")} disabled={isSubmitting || isNewVehicleSaved}>
+                      <ChevronLeft className="mr-2" />Back
                     </Button>
+                    {!isNewVehicleSaved ? (
+                        <Button type="submit" disabled={isSubmitting}>
+                            {isSubmitting && <Loader2 className="mr-2 animate-spin" />}
+                            Register Vehicle
+                        </Button>
+                    ) : (
+                        <Button onClick={() => setStep("services")}>
+                            Continue to Services <ChevronRight className="ml-2" />
+                        </Button>
+                    )}
                   </div>
                 </form>
               </Form>
@@ -550,6 +564,7 @@ const handleShareReceipt = async () => {
                     <Separator />
                     <div className="flex justify-between font-bold text-lg"><span >Total Paid</span><span>{formatCurrency(transaction?.totalAmount || 0)}</span></div>
                     <div className="flex justify-between text-sm"><span className="text-muted-foreground">Payment Method</span><span>{transaction?.payment.method}</span></div>
+                    <div className="flex justify-between text-sm"><span className="text-muted-foreground">Status</span><span className={transaction?.status === 'Pending Payment' ? 'text-destructive' : ''}>{transaction?.status}</span></div>
                 </CardContent>
                 <CardFooter className="flex flex-col gap-2">
                     {transaction && (
@@ -594,3 +609,8 @@ const handleShareReceipt = async () => {
 
     
 
+
+
+    
+
+    

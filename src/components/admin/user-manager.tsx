@@ -12,16 +12,27 @@ import { useFirestore, useMemoFirebase } from '@/firebase';
 import { useCollection } from '@/firebase/firestore/use-collection';
 import { useUser } from "@/firebase/auth/use-user";
 import type { UserProfile } from "@/lib/types";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
 import { Pencil, PlusCircle, Trash2, Loader2 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
+import { cn } from "@/lib/utils";
 
 const userSchema = z.object({
   uid: z.string().optional(),
@@ -59,6 +70,8 @@ export function UserManager() {
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [editingUser, setEditingUser] = useState<(UserProfile & { id: string }) | null>(null);
+  const [userToDelete, setUserToDelete] = useState<(UserProfile & { id: string }) | null>(null);
+  const [isDeleteAlertOpen, setIsDeleteAlertOpen] = useState(false);
   const { toast } = useToast();
 
   const form = useForm<z.infer<typeof userSchema>>({
@@ -151,21 +164,30 @@ export function UserManager() {
     }
   };
 
-
-  const handleDelete = async (userToDelete: UserProfile) => {
+  const handleDeleteConfirm = async () => {
+    if (!userToDelete) return;
+    
     if (!firestore || !currentUser) return;
     if (userToDelete.uid === currentUser?.uid) {
         toast({ title: "Action Forbidden", description: "You cannot delete your own account.", variant: "destructive" });
+        setIsDeleteAlertOpen(false);
+        setUserToDelete(null);
         return;
     }
-    // In a real app, you'd want to delete the user from Auth too, which requires a backend function.
-    // For this client-side only implementation, we'll just delete the Firestore record.
+
     try {
         await deleteDoc(doc(firestore, 'users', userToDelete.uid));
         
-        toast({ title: "User Profile Deleted", description: `Profile for ${userToDelete.name} deleted. Note: This does not delete the user from Firebase Authentication.`, variant: "destructive" });
+        toast({ 
+            title: "User Profile Deleted", 
+            description: `Profile for ${userToDelete.name} deleted. Final Step: Manually delete this user from the Firebase Authentication console.`, 
+            duration: 9000,
+        });
     } catch (error) {
         toast({ title: "Error", description: "Could not delete user profile.", variant: "destructive" });
+    } finally {
+        setIsDeleteAlertOpen(false);
+        setUserToDelete(null);
     }
   };
 
@@ -207,7 +229,16 @@ export function UserManager() {
                       <Button variant="ghost" size="icon" onClick={() => handleDialogOpen(user)}>
                         <Pencil className="h-4 w-4" />
                       </Button>
-                       <Button variant="ghost" size="icon" className="text-destructive" onClick={() => handleDelete(user)} disabled={user.uid === currentUser?.uid}>
+                       <Button 
+                         variant="ghost" 
+                         size="icon" 
+                         className="text-destructive" 
+                         onClick={() => {
+                           setUserToDelete(user);
+                           setIsDeleteAlertOpen(true);
+                         }} 
+                         disabled={user.uid === currentUser?.uid}
+                       >
                         <Trash2 className="h-4 w-4" />
                       </Button>
                     </TableCell>
@@ -274,6 +305,21 @@ export function UserManager() {
           </Form>
         </DialogContent>
       </Dialog>
+
+      <AlertDialog open={isDeleteAlertOpen} onOpenChange={setIsDeleteAlertOpen}>
+        <AlertDialogContent>
+            <AlertDialogHeader>
+            <AlertDialogTitle>Are you absolutely sure?</AlertDialogTitle>
+            <AlertDialogDescription>
+                This action will only delete the user's profile from your app's database. It <span className="font-bold">cannot</span> remove the user from Firebase Authentication. You must complete that step manually in the Firebase Console.
+            </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+            <AlertDialogCancel onClick={() => setUserToDelete(null)}>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={handleDeleteConfirm} className={cn(buttonVariants({ variant: "destructive" }))}>Delete Profile</AlertDialogAction>
+            </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </>
   );
 }

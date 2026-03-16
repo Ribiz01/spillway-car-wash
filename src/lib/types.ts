@@ -29,6 +29,7 @@ export interface Service {
 }
 
 export type PaymentMethod = 'Cash' | 'Mobile Money' | 'Corporate Account';
+export type TransactionStatus = 'Completed' | 'Pending Payment';
 
 export interface Payment {
   method: PaymentMethod;
@@ -44,4 +45,7 @@ export interface Transaction {
   totalAmount: number;
   payment: Payment;
   userId: string;
+  status: TransactionStatus;
 }
+
+    

@@ -1,33 +1,38 @@
 "use client";
 
 import { useState, useMemo } from 'react';
+import dynamic from 'next/dynamic';
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { DollarSign, Car, Briefcase, Users } from 'lucide-react';
+import { DollarSign, Car } from 'lucide-react';
 import { useCollection } from '@/firebase/firestore/use-collection';
 import { formatCurrency } from '@/lib/utils';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../ui/select';
-import {
-  ChartContainer,
-  ChartTooltip,
-  ChartTooltipContent,
-} from "@/components/ui/chart";
-import { Bar, BarChart as RechartsBarChart, XAxis, YAxis, CartesianGrid } from "recharts";
-import type { ChartConfig } from "@/components/ui/chart";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../ui/table';
 import { Badge } from '../ui/badge';
 import { Skeleton } from '../ui/skeleton';
 import { collection, query, where, orderBy } from 'firebase/firestore';
 import { useFirestore, useMemoFirebase } from '@/firebase';
+import { useUser } from '@/firebase/auth/use-user';
 import type { Transaction } from '@/lib/types';
+
+const ServicePerformanceChart = dynamic(
+  () => import('./service-performance-chart').then((mod) => mod.ServicePerformanceChart),
+  {
+    ssr: false,
+    loading: () => <Skeleton className="h-[200px] w-full" />,
+  }
+);
+
 
 type TimeFilter = 'today' | 'week' | 'month';
 
 export function AdminDashboard() {
   const [timeFilter, setTimeFilter] = useState<TimeFilter>('today');
   const firestore = useFirestore();
+  const { user, isLoading: isUserLoading } = useUser();
   
   const transactionsQuery = useMemoFirebase(() => {
-    if (!firestore) return null;
+    if (!firestore || !user) return null;
 
     const now = new Date();
     const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -53,18 +58,19 @@ export function AdminDashboard() {
       where('timestamp', '>=', startDate.toISOString()),
       orderBy('timestamp', 'desc')
     );
-  }, [firestore, timeFilter]);
+  }, [firestore, timeFilter, user]);
 
-  const { data, isLoading } = useCollection<Omit<Transaction, 'attendantName'>>(transactionsQuery);
+  const { data, isLoading: areTransactionsLoading } = useCollection<Transaction>(transactionsQuery);
+  const isLoading = isUserLoading || areTransactionsLoading;
 
   const filteredTransactions = data || [];
 
-  const totalRevenue = filteredTransactions.reduce((acc, t) => acc + t.totalAmount, 0);
-  const totalVehicles = filteredTransactions.length;
-  const cashTotal = filteredTransactions.filter(t => t.payment.method === 'Cash').reduce((acc, t) => acc + t.totalAmount, 0);
-  const mobileMoneyTotal = filteredTransactions.filter(t => t.payment.method === 'Mobile Money').reduce((acc, t) => acc + t.totalAmount, 0);
-  const corporateTotal = filteredTransactions.filter(t => t.payment.method === 'Corporate Account').reduce((acc, t) => acc + t.totalAmount, 0);
+  const completedTransactions = filteredTransactions.filter(t => t.status === 'Completed');
 
+  const totalRevenue = completedTransactions.reduce((acc, t) => acc + t.totalAmount, 0);
+  const totalVehicles = filteredTransactions.length;
+  const cashTotal = completedTransactions.filter(t => t.payment.method === 'Cash').reduce((acc, t) => acc + t.totalAmount, 0);
+  const mobileMoneyTotal = completedTransactions.filter(t => t.payment.method === 'Mobile Money').reduce((acc, t) => acc + t.totalAmount, 0);
 
   const servicePerformance = useMemo(() => {
     const serviceCount: { [key: string]: number } = {};
@@ -78,13 +84,6 @@ export function AdminDashboard() {
       .sort((a, b) => b.count - a.count);
   }, [filteredTransactions]);
 
-  const chartConfig = {
-    count: {
-      label: "Washes",
-      color: "hsl(var(--primary))",
-    },
-  } satisfies ChartConfig;
-
   if (isLoading) {
     return (
         <div className="space-y-6">
@@ -92,10 +91,9 @@ export function AdminDashboard() {
                 <Skeleton className="h-8 w-64" />
                 <Skeleton className="h-10 w-[180px]" />
             </div>
-            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-5">
+            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
                 <Card><CardHeader><Skeleton className="h-5 w-32" /></CardHeader><CardContent><Skeleton className="h-8 w-24" /><Skeleton className="h-4 w-40 mt-1" /></CardContent></Card>
                 <Card><CardHeader><Skeleton className="h-5 w-32" /></CardHeader><CardContent><Skeleton className="h-8 w-12" /><Skeleton className="h-4 w-32 mt-1" /></CardContent></Card>
-                <Card><CardHeader><Skeleton className="h-5 w-32" /></CardHeader><CardContent><Skeleton className="h-8 w-24" /></CardContent></Card>
                 <Card><CardHeader><Skeleton className="h-5 w-32" /></CardHeader><CardContent><Skeleton className="h-8 w-24" /></CardContent></Card>
                 <Card><CardHeader><Skeleton className="h-5 w-32" /></CardHeader><CardContent><Skeleton className="h-8 w-24" /></CardContent></Card>
             </div>
@@ -123,7 +121,7 @@ export function AdminDashboard() {
         </Select>
       </div>
       
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-5">
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
             <CardTitle className="text-sm font-medium">Total Revenue</CardTitle>
@@ -131,7 +129,7 @@ export function AdminDashboard() {
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold">{formatCurrency(totalRevenue)}</div>
-            <p className="text-xs text-muted-foreground">from {totalVehicles} transactions</p>
+            <p className="text-xs text-muted-foreground">from {completedTransactions.length} completed transactions</p>
           </CardContent>
         </Card>
         <Card>
@@ -162,15 +160,6 @@ export function AdminDashboard() {
             <div className="text-2xl font-bold">{formatCurrency(mobileMoneyTotal)}</div>
           </CardContent>
         </Card>
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Corporate Washes</CardTitle>
-            <Briefcase className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">{formatCurrency(corporateTotal)}</div>
-          </CardContent>
-        </Card>
       </div>
 
       <div className="grid gap-6 md:grid-cols-2">
@@ -179,19 +168,7 @@ export function AdminDashboard() {
             <CardTitle>Service Performance</CardTitle>
           </CardHeader>
           <CardContent>
-            {servicePerformance.length > 0 ? (
-            <ChartContainer config={chartConfig} className="min-h-[200px] w-full">
-              <RechartsBarChart accessibilityLayer data={servicePerformance}>
-                <CartesianGrid vertical={false} />
-                <XAxis dataKey="name" tickLine={false} tickMargin={10} axisLine={false} />
-                <YAxis />
-                <ChartTooltip content={<ChartTooltipContent />} />
-                <Bar dataKey="count" fill="var(--color-count)" radius={4} />
-              </RechartsBarChart>
-            </ChartContainer>
-            ) : (
-                <div className="flex h-[200px] items-center justify-center text-muted-foreground">No data for this period.</div>
-            )}
+            <ServicePerformanceChart data={servicePerformance} />
           </CardContent>
         </Card>
 
@@ -206,6 +183,7 @@ export function AdminDashboard() {
                   <TableHead>License Plate</TableHead>
                   <TableHead>Amount</TableHead>
                   <TableHead>Payment</TableHead>
+                  <TableHead>Status</TableHead>
                   <TableHead>User ID</TableHead>
                   <TableHead>Date</TableHead>
                 </TableRow>
@@ -220,13 +198,18 @@ export function AdminDashboard() {
                         {t.payment.method}
                       </Badge>
                     </TableCell>
+                    <TableCell>
+                      <Badge variant={t.status === 'Completed' ? 'secondary' : 'outline'}>
+                        {t.status}
+                      </Badge>
+                    </TableCell>
                     <TableCell className="font-mono text-xs truncate max-w-[100px]">{t.userId}</TableCell>
                     <TableCell>{new Date(t.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</TableCell>
                   </TableRow>
                 ))}
                  {filteredTransactions.length === 0 && (
                   <TableRow>
-                    <TableCell colSpan={5} className="text-center text-muted-foreground">
+                    <TableCell colSpan={6} className="text-center text-muted-foreground">
                       No transactions for this period.
                     </TableCell>
                   </TableRow>
