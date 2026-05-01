@@ -18,7 +18,7 @@ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { useToast } from "@/hooks/use-toast";
-import type { Service, Vehicle, Transaction, UserProfile } from "@/lib/types";
+import type { Service, Vehicle, Transaction, UserProfile, Washer } from "@/lib/types";
 import { formatCurrency } from "@/lib/utils";
 import { Check, ChevronLeft, ChevronRight, Loader2, Sparkles, Wind, Droplets, Car, Camera, Image as ImageIcon, Disc, Star, Share2 } from "lucide-react";
 import { Checkbox } from "../ui/checkbox";
@@ -38,6 +38,7 @@ const newVehicleSchema = z.object({
 
 const servicesSchema = z.object({
   selectedServices: z.array(z.string()).min(1, "Please select at least one service."),
+  assignedWashers: z.array(z.string()).min(1, "Please select at least one washer."),
 });
 
 const paymentSchema = z.object({
@@ -84,6 +85,9 @@ export function Workflow() {
   const servicesQuery = useMemoFirebase(() => firestore ? collection(firestore, 'services') : null, [firestore]);
   const { data: allServices, isLoading: isLoadingServices } = useCollection<Service>(servicesQuery);
 
+  const washersQuery = useMemoFirebase(() => firestore ? collection(firestore, 'washers') : null, [firestore]);
+  const { data: allWashers, isLoading: isLoadingWashers } = useCollection<Washer>(washersQuery);
+
   const vehicleForm = useForm<z.infer<typeof vehicleSchema>>({
     resolver: zodResolver(vehicleSchema),
     defaultValues: { licensePlate: "" },
@@ -101,7 +105,7 @@ export function Workflow() {
 
   const servicesForm = useForm<z.infer<typeof servicesSchema>>({
     resolver: zodResolver(servicesSchema),
-    defaultValues: { selectedServices: [] },
+    defaultValues: { selectedServices: [], assignedWashers: [] },
   });
 
   const paymentForm = useForm<z.infer<typeof paymentSchema>>({
@@ -158,6 +162,11 @@ export function Workflow() {
     setIsSubmitting(true);
     
     const selectedIds = servicesForm.getValues("selectedServices");
+    const assignedWasherIds = servicesForm.getValues("assignedWashers");
+    const assignedWashers = allWashers
+      ?.filter(w => assignedWasherIds.includes(w.id))
+      .map(w => ({ id: w.id, name: w.name })) || [];
+    
     const selectedServices = allServices.filter(s => selectedIds.includes(s.id));
     const totalAmount = selectedServices.reduce((acc, s) => acc + s.price, 0);
 
@@ -172,6 +181,7 @@ export function Workflow() {
         amount: totalAmount,
       },
       userId: user.uid,
+      assignedWashers,
       status: data.paymentMethod === 'Corporate Account' ? 'Pending Payment' : 'Completed',
     };
     
@@ -271,7 +281,7 @@ const handleShareReceipt = async () => {
   const startNew = () => {
     vehicleForm.reset({ licensePlate: "" });
     newVehicleForm.reset({ licensePlate: "", type: "Sedan", ownerName: "", phoneNumber: "" });
-    servicesForm.reset({ selectedServices: [] });
+    servicesForm.reset({ selectedServices: [], assignedWashers: [] });
     paymentForm.reset({ paymentMethod: "Cash", reference: "" });
     setCurrentVehicle(null);
     setTransaction(null);
@@ -436,6 +446,36 @@ const handleShareReceipt = async () => {
                         <CardContent>
                         <Form {...servicesForm}>
                             <form onSubmit={servicesForm.handleSubmit(handleServicesSubmit)}>
+                                <FormField control={servicesForm.control} name="assignedWashers" render={({ field }) => (
+                                    <FormItem className="mb-6">
+                                        <FormLabel>Assigned Washers (Points are split equally)</FormLabel>
+                                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mt-2">
+                                            {allWashers?.map(w => (
+                                                 <FormField key={w.id} control={servicesForm.control} name="assignedWashers" render={({ field: subField }) => {
+                                                    return (
+                                                        <FormItem key={w.id} className="flex flex-row items-start space-x-3 space-y-0 rounded-md border p-3 shadow-sm cursor-pointer hover:border-primary transition-colors">
+                                                            <FormControl>
+                                                                <Checkbox 
+                                                                    checked={subField.value?.includes(w.id)}
+                                                                    onCheckedChange={(checked) => {
+                                                                        return checked
+                                                                            ? subField.onChange([...subField.value, w.id])
+                                                                            : subField.onChange(subField.value?.filter((value) => value !== w.id))
+                                                                    }}
+                                                                />
+                                                            </FormControl>
+                                                            <FormLabel className="font-medium cursor-pointer w-full text-sm">
+                                                                {w.name}
+                                                            </FormLabel>
+                                                        </FormItem>
+                                                    )
+                                                 }} />
+                                            ))}
+                                            {allWashers?.length === 0 && <p className="text-muted-foreground text-sm col-span-full">No washers available</p>}
+                                        </div>
+                                        <FormMessage />
+                                    </FormItem>
+                                )} />
                                 <FormField control={servicesForm.control} name="selectedServices" render={({ field }) => (
                                     <FormItem className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                                         {isLoadingServices && <>

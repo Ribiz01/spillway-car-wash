@@ -45,7 +45,15 @@ export interface Transaction {
   totalAmount: number;
   payment: Payment;
   userId: string;
+  washerId?: string; // Legacy
+  washerName?: string; // Legacy
+  assignedWashers?: { id: string; name: string }[];
   status: TransactionStatus;
+}
+
+export interface Washer {
+  id: string;
+  name: string;
 }
 
     

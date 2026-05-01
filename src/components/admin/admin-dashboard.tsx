@@ -24,41 +24,39 @@ const ServicePerformanceChart = dynamic(
 );
 
 
-type TimeFilter = 'today' | 'week' | 'month';
+import { Input } from '../ui/input';
 
 export function AdminDashboard() {
-  const [timeFilter, setTimeFilter] = useState<TimeFilter>('today');
+  const [startDate, setStartDate] = useState<string>(() => {
+    const today = new Date();
+    return today.toISOString().split('T')[0];
+  });
+  const [endDate, setEndDate] = useState<string>(() => {
+    const today = new Date();
+    return today.toISOString().split('T')[0];
+  });
   const firestore = useFirestore();
   const { user, isLoading: isUserLoading } = useUser();
   
   const transactionsQuery = useMemoFirebase(() => {
     if (!firestore || !user) return null;
 
-    const now = new Date();
-    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    let startDate: Date;
-
-    switch (timeFilter) {
-      case 'week':
-        startDate = new Date(today);
-        startDate.setDate(today.getDate() - 7);
-        break;
-      case 'month':
-        startDate = new Date(today);
-        startDate.setMonth(today.getMonth() - 1);
-        break;
-      case 'today':
-      default:
-        startDate = today;
-        break;
+    let q = collection(firestore, 'transactions');
+    
+    if (startDate) {
+      const start = new Date(startDate);
+      start.setHours(0, 0, 0, 0);
+      q = query(q, where('timestamp', '>=', start.toISOString()));
+    }
+    
+    if (endDate) {
+       const end = new Date(endDate);
+       end.setHours(23, 59, 59, 999);
+       q = query(q, where('timestamp', '<=', end.toISOString()));
     }
 
-    return query(
-      collection(firestore, 'transactions'),
-      where('timestamp', '>=', startDate.toISOString()),
-      orderBy('timestamp', 'desc')
-    );
-  }, [firestore, timeFilter, user]);
+    return query(q, orderBy('timestamp', 'desc'));
+  }, [firestore, startDate, endDate, user]);
 
   const { data, isLoading: areTransactionsLoading } = useCollection<Transaction>(transactionsQuery);
   const isLoading = isUserLoading || areTransactionsLoading;
@@ -83,6 +81,24 @@ export function AdminDashboard() {
       .map(([name, count]) => ({ name, count }))
       .sort((a, b) => b.count - a.count);
   }, [filteredTransactions]);
+
+  const washerPerformance = useMemo(() => {
+    const points: { [key: string]: number } = {};
+    for (const transaction of completedTransactions) {
+      if (transaction.assignedWashers && transaction.assignedWashers.length > 0) {
+        const pointShare = 1 / transaction.assignedWashers.length;
+        for (const washer of transaction.assignedWashers) {
+          points[washer.name] = (points[washer.name] || 0) + pointShare;
+        }
+      } else if (transaction.washerName) {
+        // Fallback for legacy transactions
+        points[transaction.washerName] = (points[transaction.washerName] || 0) + 1;
+      }
+    }
+    return Object.entries(points)
+      .map(([name, points]) => ({ name, points: Number(points.toFixed(2)) }))
+      .sort((a, b) => b.points - a.points);
+  }, [completedTransactions]);
 
   if (isLoading) {
     return (
@@ -109,16 +125,11 @@ export function AdminDashboard() {
     <div className="space-y-6">
       <div className="flex justify-between items-center">
         <h1 className="text-2xl font-bold tracking-tight">Admin Dashboard</h1>
-        <Select value={timeFilter} onValueChange={(value: TimeFilter) => setTimeFilter(value)}>
-          <SelectTrigger className="w-[180px]">
-            <SelectValue placeholder="Filter by date" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="today">Today</SelectItem>
-            <SelectItem value="week">This Week</SelectItem>
-            <SelectItem value="month">This Month</SelectItem>
-          </SelectContent>
-        </Select>
+        <div className="flex items-center gap-2">
+          <Input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="w-[150px]" />
+          <span className="text-muted-foreground text-sm">to</span>
+          <Input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} className="w-[150px]" />
+        </div>
       </div>
       
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
@@ -211,6 +222,36 @@ export function AdminDashboard() {
                   <TableRow>
                     <TableCell colSpan={6} className="text-center text-muted-foreground">
                       No transactions for this period.
+                    </TableCell>
+                  </TableRow>
+                 )}
+              </TableBody>
+            </Table>
+          </CardContent>
+        </Card>
+        <Card className="md:col-span-2">
+          <CardHeader>
+            <CardTitle>Washer Performance (Points)</CardTitle>
+          </CardHeader>
+          <CardContent>
+             <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Washer Name</TableHead>
+                  <TableHead className="text-right">Points / Washes</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {washerPerformance.map(w => (
+                  <TableRow key={w.name}>
+                    <TableCell className="font-medium">{w.name}</TableCell>
+                    <TableCell className="text-right">{w.points}</TableCell>
+                  </TableRow>
+                ))}
+                 {washerPerformance.length === 0 && (
+                  <TableRow>
+                    <TableCell colSpan={2} className="text-center text-muted-foreground">
+                      No washer points for this period.
                     </TableCell>
                   </TableRow>
                  )}

@@ -31,6 +31,7 @@ const adminNav = [
   { href: "/admin", icon: Home, label: "Dashboard" },
   { href: "/admin/services", icon: Wrench, label: "Services" },
   { href: "/admin/users", icon: Users, label: "Users" },
+  { href: "/admin/washers", icon: Users, label: "Washers" },
   { href: "/dashboard", icon: HardHat, label: "Attendant View" },
 ];
 
