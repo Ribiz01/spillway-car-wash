@@ -115,6 +115,11 @@ service cloud.firestore {
       allow update, delete: if isAdmin() && isExistingDoc();
     }
 
+    match /washers/{washerId} {
+      allow get, list: if isSignedIn();
+      allow create, update, delete: if isAdmin();
+    }
+
     /**
      * @description Employees can create transactions they are responsible for. All employees can view transactions for operational purposes, but only the original creator or an admin can modify or delete them.
      * @path /transactions/{transactionId}
