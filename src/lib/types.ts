@@ -32,12 +32,7 @@ export interface Service {
   price: number;
 }
 
-/**
- * 'Mobile Money' is MTN/Zamtel and any other network; 'Airtel Money' is kept
- * separate so Airtel takings can be banked and checked on their own. Both count
- * as mobile money in every total — use the helpers in lib/payments.
- */
-export type PaymentMethod = 'Cash' | 'Airtel Money' | 'Mobile Money' | 'Corporate Account';
+export type PaymentMethod = 'Cash' | 'Mobile Money' | 'Corporate Account';
 /**
  * 'In Progress'    — car checked in, being washed, no money taken yet.
  * 'Pending Payment'— finished and billed to a corporate account, not yet settled.
@@ -207,12 +202,12 @@ export type ReceiptDeliveryStatus = 'Sent' | 'Failed';
 
 export type CustomerTier = 'Bronze' | 'Silver' | 'Gold' | 'Platinum';
 
-/** Tier thresholds in points (1 point per K1 spent). */
+/** Tier thresholds in points (1 point per car washed). */
 export const TIER_THRESHOLDS: Record<CustomerTier, number> = {
   Bronze: 0,
-  Silver: 100,
-  Gold: 300,
-  Platinum: 700,
+  Silver: 5,
+  Gold: 15,
+  Platinum: 30,
 };
 
 export function calcTier(points: number): CustomerTier {
@@ -222,10 +217,8 @@ export function calcTier(points: number): CustomerTier {
   return 'Bronze';
 }
 
-/** Points earned for a paid wash: 1 point per full K1. */
-export function calcPointsEarned(amountZmw: number): number {
-  return Math.max(0, Math.floor(amountZmw));
-}
+/** Points earned per car washed. */
+export const POINTS_PER_WASH = 1;
 
 /**
  * A regular customer, keyed by phone number (digits only, 260… format) so the
@@ -250,7 +243,7 @@ export interface Customer {
 // Expenses & banking
 // ---------------------------------------------------------------------------
 
-export type ExpenseSource = 'Cash' | 'Airtel Money' | 'Mobile Money' | 'Bank';
+export type ExpenseSource = 'Cash' | 'Mobile Money' | 'Bank';
 
 export const EXPENSE_CATEGORIES = [
   'Cleaning supplies',

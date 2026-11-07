@@ -9,8 +9,8 @@ import { useUser } from '@/firebase/auth/use-user';
 import { useSyncStatus } from '@/firebase/sync-status';
 import type { CorporateAccount, PaymentMethod, Service, Transaction, Vehicle, Washer } from '@/lib/types';
 import { cn, formatCurrency } from '@/lib/utils';
-import { isMobileMoney, methodsUsed, moneyEquals, roundMoney, transactionPayments } from '@/lib/payments';
-import { findCustomer, loyaltyAmount, recordLoyaltyVisit } from '@/lib/customers';
+import { methodsUsed, moneyEquals, roundMoney, transactionPayments } from '@/lib/payments';
+import { findCustomer, recordLoyaltyVisit } from '@/lib/customers';
 import { calcTier } from '@/lib/types';
 import type { Payment } from '@/lib/types';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -204,7 +204,7 @@ export function ActiveJobs() {
     lines.every(
       (l) =>
         parseAmount(l.amount) > 0 &&
-        (!isMobileMoney(l.method) || l.reference.trim().length > 0) &&
+        (l.method !== 'Mobile Money' || l.reference.trim().length > 0) &&
         (l.method !== 'Corporate Account' || !!l.accountId)
     );
 
@@ -290,13 +290,13 @@ export function ActiveJobs() {
       setReceipt(completed);
       setJob(null);
 
-      // Loyalty: 1 point per K1 actually paid (not the part on a company account).
+      // Loyalty: 1 point per car washed, whoever pays (cash, MoMo or company).
       // Fire-and-forget so a slow network never delays the receipt.
       setPointsEarned(null);
       const vehicle = jobVehicle;
       if (vehicle?.phoneNumber) {
         findCustomer(firestore, vehicle.phoneNumber).then((previous) => {
-          const points = recordLoyaltyVisit(firestore, vehicle, loyaltyAmount(completed), previous);
+          const points = recordLoyaltyVisit(firestore, vehicle, completed.totalAmount, previous);
           if (points > 0) setPointsEarned({ points, total: (previous?.totalPoints ?? 0) + points });
         });
       }
@@ -646,8 +646,7 @@ export function ActiveJobs() {
                         </SelectTrigger>
                         <SelectContent>
                           <SelectItem value="Cash">Cash</SelectItem>
-                          <SelectItem value="Airtel Money">Airtel Money</SelectItem>
-                          <SelectItem value="Mobile Money">MTN / other Mobile Money</SelectItem>
+                          <SelectItem value="Mobile Money">Mobile Money</SelectItem>
                           <SelectItem value="Corporate Account">Corporate Account</SelectItem>
                         </SelectContent>
                       </Select>
@@ -672,10 +671,10 @@ export function ActiveJobs() {
                       )}
                     </div>
 
-                    {isMobileMoney(line.method) && (
+                    {line.method === 'Mobile Money' && (
                       <div className="space-y-1">
                         <Input
-                          placeholder={`${line.method} transaction ID`}
+                          placeholder="Mobile Money reference, e.g. MM-12345"
                           value={line.reference}
                           onChange={(e) => updateLine(line.key, { reference: e.target.value })}
                         />
@@ -855,7 +854,7 @@ export function ActiveJobs() {
               {pointsEarned && (
                 <div className="flex items-center justify-between rounded-md border border-amber-400/40 bg-amber-400/10 p-2.5 text-amber-800">
                   <span className="flex items-center gap-1.5">
-                    <Trophy className="h-4 w-4" /> +{pointsEarned.points} loyalty points
+                    <Trophy className="h-4 w-4" /> +{pointsEarned.points} loyalty point{pointsEarned.points === 1 ? '' : 's'}
                   </span>
                   <span className="text-xs">
                     {pointsEarned.total} pts · {calcTier(pointsEarned.total)}

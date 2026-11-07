@@ -5,7 +5,7 @@ export default function CustomersPage() {
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-bold tracking-tight">Customers &amp; Loyalty</h1>
-        <p className="text-muted-foreground">Regulars, their points and tiers. Customers earn 1 point per K1 paid.</p>
+        <p className="text-muted-foreground">Regulars, their points and tiers. Customers earn 1 point per car washed.</p>
       </div>
       <CustomerList />
     </div>

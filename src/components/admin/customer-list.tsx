@@ -40,7 +40,7 @@ function daysSince(iso?: string) {
 
 /**
  * Loyalty customers. A customer is created the first time a car with a phone
- * number is paid for, and earns 1 point per K1 paid.
+ * number is washed, and earns 1 point per car washed.
  */
 export function CustomerList() {
   const firestore = useFirestore();
@@ -134,7 +134,7 @@ export function CustomerList() {
             <CardContent>
               <div className="text-2xl font-bold">{isLoading ? '…' : counts[tier]}</div>
               <p className="text-xs text-muted-foreground">
-                {tier === 'Bronze' ? `under ${TIER_THRESHOLDS.Silver}` : `${TIER_THRESHOLDS[tier]}+`} points
+                {tier === 'Bronze' ? `under ${TIER_THRESHOLDS.Silver}` : `${TIER_THRESHOLDS[tier]}+`} washes
               </p>
             </CardContent>
           </Card>
@@ -149,7 +149,7 @@ export function CustomerList() {
               {tierFilter !== 'All' && <Badge variant="secondary">{tierFilter}</Badge>}
             </CardTitle>
             <CardDescription>
-              {customers.length} customers · {lapsed} haven&apos;t been back in 30+ days. 1 point per K1 paid.
+              {customers.length} customers · {lapsed} haven&apos;t been back in 30+ days. 1 point per car washed.
             </CardDescription>
           </div>
           <div className="flex w-full gap-2 sm:w-auto">

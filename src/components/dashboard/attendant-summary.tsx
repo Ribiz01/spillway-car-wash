@@ -7,7 +7,7 @@ import { useUser } from '@/firebase/auth/use-user';
 import { useCollection } from '@/firebase/firestore/use-collection';
 import type { Transaction } from '@/lib/types';
 import { formatCurrency, todayIso } from '@/lib/utils';
-import { amountByMethod, amountMobileMoney, describeMethods, roundMoney } from '@/lib/payments';
+import { amountByMethod, describeMethods, roundMoney } from '@/lib/payments';
 import { isRevenue } from '@/lib/transactions';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
@@ -70,7 +70,7 @@ export function AttendantSummary() {
       rows,
       total: roundMoney(rows.reduce((a, t) => a + t.totalAmount, 0)),
       cash: roundMoney(rows.reduce((a, t) => a + amountByMethod(t, 'Cash'), 0)),
-      mobile: roundMoney(rows.reduce((a, t) => a + amountMobileMoney(t), 0)),
+      mobile: roundMoney(rows.reduce((a, t) => a + amountByMethod(t, 'Mobile Money'), 0)),
       corporate: roundMoney(rows.reduce((a, t) => a + amountByMethod(t, 'Corporate Account'), 0)),
     };
   }, [data, range]);

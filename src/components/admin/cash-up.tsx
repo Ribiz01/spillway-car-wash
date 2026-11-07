@@ -8,7 +8,7 @@ import { useDoc } from '@/firebase/firestore/use-doc';
 import { useUser } from '@/firebase/auth/use-user';
 import type { CashUp as CashUpRecord, Transaction } from '@/lib/types';
 import { formatCurrency, todayIso, startOfLocalDayIso, endOfLocalDayIso } from '@/lib/utils';
-import { amountByMethod, amountMobileMoney, describeMethods, isMobileMoney, transactionPayments, usedMethod, usedMobileMoney } from '@/lib/payments';
+import { amountByMethod, describeMethods, transactionPayments, usedMethod } from '@/lib/payments';
 import { isActive, isRevenue, isReversed, reversalSummary } from '@/lib/transactions';
 import { downloadCsv, toCsvSections } from '@/lib/csv';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -76,14 +76,14 @@ export function CashUp() {
     // these sum PORTIONS rather than counting whole transactions. Cash + MoMo +
     // corporate therefore still reconciles exactly to the day's total.
     const cashTotal = rows.reduce((acc, t) => acc + amountByMethod(t, 'Cash'), 0);
-    const momoTotal = rows.reduce((acc, t) => acc + amountMobileMoney(t), 0);
+    const momoTotal = rows.reduce((acc, t) => acc + amountByMethod(t, 'Mobile Money'), 0);
     const corporateTotal = rows.reduce(
       (acc, t) => acc + amountByMethod(t, 'Corporate Account'),
       0
     );
 
     // Washes with any mobile money portion — each MoMo line needs a reference.
-    const momoRows = rows.filter((t) => usedMobileMoney(t));
+    const momoRows = rows.filter((t) => usedMethod(t, 'Mobile Money'));
 
     // Per-attendant breakdown — this is who you hold accountable for the float.
     // Keyed on whoever TOOK THE PAYMENT, not whoever checked the car in: a car
@@ -104,7 +104,7 @@ export function CashUp() {
       const entry = byAttendant.get(key)!;
       entry.count += 1;
       entry.cash += amountByMethod(t, 'Cash');
-      entry.momo += amountMobileMoney(t);
+      entry.momo += amountByMethod(t, 'Mobile Money');
       entry.corporate += amountByMethod(t, 'Corporate Account');
     }
 
@@ -203,10 +203,10 @@ export function CashUp() {
           Plate: t.licensePlate,
           Reference:
             transactionPayments(t)
-              .filter((p) => isMobileMoney(p.method))
+              .filter((p) => p.method === 'Mobile Money')
               .map((p) => p.reference || 'MISSING')
               .join('; ') || 'MISSING',
-          Amount: amountMobileMoney(t).toFixed(2),
+          Amount: amountByMethod(t, 'Mobile Money').toFixed(2),
         })),
       },
       {
@@ -227,7 +227,7 @@ export function CashUp() {
           Washers: (t.assignedWashers ?? []).map((w) => w.name).join('; '),
           Method: describeMethods(t),
           Cash: amountByMethod(t, 'Cash').toFixed(2),
-          'Mobile Money': amountMobileMoney(t).toFixed(2),
+          'Mobile Money': amountByMethod(t, 'Mobile Money').toFixed(2),
           'On Account': amountByMethod(t, 'Corporate Account').toFixed(2),
           Reference: transactionPayments(t).map((p) => p.reference || '').filter(Boolean).join('; '),
           'Billed To': t.corporateAccountName ?? '',
@@ -275,7 +275,7 @@ export function CashUp() {
   };
 
   const missingRefs = summary.momoRows.filter((t) =>
-    transactionPayments(t).some((p) => isMobileMoney(p.method) && !p.reference)
+    transactionPayments(t).some((p) => p.method === 'Mobile Money' && !p.reference)
   ).length;
 
   return (
@@ -526,7 +526,7 @@ export function CashUp() {
                         <TableCell className="font-medium">{t.licensePlate}</TableCell>
                         <TableCell className="font-mono text-xs">
                           {transactionPayments(t)
-                            .filter((p) => isMobileMoney(p.method))
+                            .filter((p) => p.method === 'Mobile Money')
                             .map((p) => p.reference)
                             .filter(Boolean)
                             .join('; ') || <Badge variant="destructive">missing</Badge>}

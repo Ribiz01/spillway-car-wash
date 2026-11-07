@@ -28,11 +28,10 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { useToast } from '@/hooks/use-toast';
 import { Download, Landmark, Loader2, Trash2, TriangleAlert } from 'lucide-react';
 
-const SOURCES: ExpenseSource[] = ['Cash', 'Airtel Money', 'Mobile Money', 'Bank'];
+const SOURCES: ExpenseSource[] = ['Cash', 'Mobile Money', 'Bank'];
 const sourceLabel: Record<ExpenseSource, string> = {
   Cash: 'Cash (from the drawer)',
-  'Airtel Money': 'Airtel Money',
-  'Mobile Money': 'MTN / other Mobile Money',
+  'Mobile Money': 'Mobile Money',
   Bank: 'Bank account',
 };
 
@@ -115,11 +114,10 @@ export function ExpensesBanking() {
     const paid = (transactions ?? []).filter(isRevenue);
     const received = {
       Cash: roundMoney(paid.reduce((a, t) => a + amountByMethod(t, 'Cash'), 0)),
-      'Airtel Money': roundMoney(paid.reduce((a, t) => a + amountByMethod(t, 'Airtel Money'), 0)),
       'Mobile Money': roundMoney(paid.reduce((a, t) => a + amountByMethod(t, 'Mobile Money'), 0)),
       Bank: 0,
     } as Record<ExpenseSource, number>;
-    const spent = { Cash: 0, 'Airtel Money': 0, 'Mobile Money': 0, Bank: 0 } as Record<ExpenseSource, number>;
+    const spent = { Cash: 0, 'Mobile Money': 0, Bank: 0 } as Record<ExpenseSource, number>;
     for (const e of expenses) spent[e.source] = roundMoney(spent[e.source] + e.amount);
     const byCategory = new Map<string, number>();
     for (const e of expenses) byCategory.set(e.category, roundMoney((byCategory.get(e.category) ?? 0) + e.amount));
@@ -375,7 +373,7 @@ export function ExpensesBanking() {
                   <TableBody>
                     {SOURCES.map((s) => (
                       <TableRow key={s}>
-                        <TableCell className="font-medium">{s === 'Mobile Money' ? 'MTN / other MoMo' : s}</TableCell>
+                        <TableCell className="font-medium">{s}</TableCell>
                         <TableCell className="text-right tabular-nums">{s === 'Bank' ? '—' : formatCurrency(totals.received[s])}</TableCell>
                         <TableCell className="text-right tabular-nums">{formatCurrency(totals.spent[s])}</TableCell>
                         <TableCell className="text-right font-semibold tabular-nums">

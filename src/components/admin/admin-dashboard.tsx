@@ -7,7 +7,7 @@ import { DollarSign, Car, TriangleAlert } from 'lucide-react';
 import { Alert, AlertDescription, AlertTitle } from '../ui/alert';
 import { useCollection } from '@/firebase/firestore/use-collection';
 import { formatCurrency, todayIso, startOfLocalDayIso, endOfLocalDayIso } from '@/lib/utils';
-import { amountByMethod, amountMobileMoney, describeMethods, usedMethod } from '@/lib/payments';
+import { amountByMethod, describeMethods, usedMethod } from '@/lib/payments';
 import { isActive, isRevenue, isReversed } from '@/lib/transactions';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../ui/table';
@@ -73,7 +73,7 @@ export function AdminDashboard() {
   // Sums the cash/MoMo PORTION of each wash: with split payments one wash can
   // contribute to both, so filtering by a single method would lose money.
   const cashTotal = completedTransactions.reduce((acc, t) => acc + amountByMethod(t, 'Cash'), 0);
-  const mobileMoneyTotal = completedTransactions.reduce((acc, t) => acc + amountMobileMoney(t), 0);
+  const mobileMoneyTotal = completedTransactions.reduce((acc, t) => acc + amountByMethod(t, 'Mobile Money'), 0);
 
   const servicePerformance = useMemo(() => {
     const serviceCount: { [key: string]: number } = {};

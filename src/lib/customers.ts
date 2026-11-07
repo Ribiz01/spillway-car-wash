@@ -7,8 +7,7 @@ import {
   setDoc,
   type Firestore,
 } from 'firebase/firestore';
-import { calcPointsEarned, calcTier, type Customer, type Transaction, type Vehicle } from '@/lib/types';
-import { transactionPayments } from '@/lib/payments';
+import { calcTier, POINTS_PER_WASH, type Customer, type Vehicle } from '@/lib/types';
 
 /**
  * Phone number in international form without "+", e.g. 260977123456.
@@ -22,16 +21,6 @@ export function normalizePhone(raw?: string | null): string {
   if (digits.startsWith('0') && digits.length === 10) return `260${digits.slice(1)}`;
   if (digits.length === 9) return `260${digits}`;
   return digits.length >= 9 ? digits : '';
-}
-
-/**
- * The part of a wash that earns points: money actually paid, not the portion
- * left on a corporate account (the company pays that, not the driver).
- */
-export function loyaltyAmount(t: Pick<Transaction, 'payments' | 'payment'>): number {
-  return transactionPayments(t as Transaction)
-    .filter((p) => p.method !== 'Corporate Account')
-    .reduce((acc, p) => acc + p.amount, 0);
 }
 
 /** Look up a customer by phone. Uses the device cache first so it works offline. */
@@ -53,8 +42,8 @@ export async function findCustomer(firestore: Firestore, phone?: string | null):
 }
 
 /**
- * Adds a paid wash to the customer's loyalty record, creating it on the first
- * visit. Uses merge + increment so two tablets completing washes for the same
+ * Adds a washed car to the customer's loyalty record (1 point per car washed),
+ * creating it on the first visit. Uses merge + increment so two tablets completing washes for the same
  * customer can't overwrite each other, and so it queues offline like every
  * other write.
  *
@@ -63,12 +52,12 @@ export async function findCustomer(firestore: Firestore, phone?: string | null):
 export function recordLoyaltyVisit(
   firestore: Firestore,
   vehicle: Pick<Vehicle, 'ownerName' | 'phoneNumber' | 'licensePlate'> | null | undefined,
-  amountPaid: number,
+  washTotal: number,
   previous: Customer | null
 ): number {
   const id = normalizePhone(vehicle?.phoneNumber);
   if (!vehicle || !id) return 0;
-  const points = calcPointsEarned(amountPaid);
+  const points = POINTS_PER_WASH;
   const now = new Date().toISOString();
   const newTotal = (previous?.totalPoints ?? 0) + points;
 
@@ -79,7 +68,7 @@ export function recordLoyaltyVisit(
       name: vehicle.ownerName?.trim() || previous?.name || 'Customer',
       totalPoints: increment(points),
       totalVisits: increment(1),
-      totalSpend: increment(Math.round(amountPaid * 100) / 100),
+      totalSpend: increment(Math.round(washTotal * 100) / 100),
       // Best effort: the list always re-derives the tier from totalPoints, so a
       // stale value here (two tablets at once) never shows the wrong tier.
       tier: calcTier(newTotal),

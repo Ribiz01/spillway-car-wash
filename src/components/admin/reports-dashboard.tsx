@@ -7,7 +7,7 @@ import { useFirestore, useMemoFirebase } from '@/firebase';
 import { useCollection } from '@/firebase/firestore/use-collection';
 import { calcTier, type Customer, type Expense, type Transaction } from '@/lib/types';
 import { formatCurrency, todayIso } from '@/lib/utils';
-import { amountByMethod, amountMobileMoney, roundMoney } from '@/lib/payments';
+import { amountByMethod, roundMoney } from '@/lib/payments';
 import { isRevenue, isReversed } from '@/lib/transactions';
 import { downloadCsv, toCsvSections } from '@/lib/csv';
 import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from '@/components/ui/chart';
@@ -125,8 +125,7 @@ export function ReportsDashboard() {
 
     const methods = {
       Cash: roundMoney(paid.reduce((a, t) => a + amountByMethod(t, 'Cash'), 0)),
-      'Airtel Money': roundMoney(paid.reduce((a, t) => a + amountByMethod(t, 'Airtel Money'), 0)),
-      'MTN / other MoMo': roundMoney(paid.reduce((a, t) => a + amountByMethod(t, 'Mobile Money'), 0)),
+      'Mobile Money': roundMoney(paid.reduce((a, t) => a + amountByMethod(t, 'Mobile Money'), 0)),
       'Corporate Account': roundMoney(paid.reduce((a, t) => a + amountByMethod(t, 'Corporate Account'), 0)),
     };
 
@@ -205,7 +204,6 @@ export function ReportsDashboard() {
       expensesLast,
       profit: roundMoney(revenue - expenses),
       profitLast: roundMoney(revenueLast - expensesLast),
-      mobile: roundMoney(paid.reduce((a, t) => a + amountMobileMoney(t), 0)),
       reversed: cur.filter(isReversed).length,
       avgWashMin: avgWash ? Math.round(avgWash / 60) : null,
       methods,
@@ -314,7 +312,7 @@ export function ReportsDashboard() {
         </TabsList>
 
         <TabsContent value="overview" className="space-y-6">
-          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          <div className="grid gap-4 sm:grid-cols-3">
             {Object.entries(r.methods).map(([name, value]) => (
               <Card key={name}>
                 <CardHeader className="pb-2"><CardTitle className="text-sm font-medium text-muted-foreground">{name}</CardTitle></CardHeader>

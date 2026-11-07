@@ -42,25 +42,6 @@ export function usedMethod(t: Transaction, method: PaymentMethod): boolean {
   return transactionPayments(t).some((p) => p.method === method);
 }
 
-/** The networks that count as mobile money. */
-export const MOBILE_MONEY_METHODS: PaymentMethod[] = ['Mobile Money', 'Airtel Money'];
-
-export function isMobileMoney(method: PaymentMethod): boolean {
-  return MOBILE_MONEY_METHODS.includes(method);
-}
-
-/** Mobile money portion of a wash, across every network. */
-export function amountMobileMoney(t: Transaction): number {
-  return transactionPayments(t)
-    .filter((p) => isMobileMoney(p.method))
-    .reduce((acc, p) => acc + p.amount, 0);
-}
-
-/** True if any part of this wash was paid by mobile money on any network. */
-export function usedMobileMoney(t: Transaction): boolean {
-  return transactionPayments(t).some((p) => isMobileMoney(p.method));
-}
-
 /** Sum of a method across many transactions. */
 export function sumByMethod(rows: Transaction[], method: PaymentMethod): number {
   return roundMoney(rows.reduce((acc, t) => acc + amountByMethod(t, method), 0));
