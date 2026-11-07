@@ -17,8 +17,12 @@ export interface Vehicle {
   id?: string;
   licensePlate: string;
   type: 'Sedan' | 'SUV' | 'Truck' | 'Minibus';
+  make?: string;
+  model?: string;
   ownerName?: string;
   phoneNumber?: string;
+  /** The customer agreed to get receipts on WhatsApp. Required for automatic sending. */
+  whatsappReceiptConsent?: boolean;
   photoDataUri?: string;
 }
 
@@ -28,7 +32,12 @@ export interface Service {
   price: number;
 }
 
-export type PaymentMethod = 'Cash' | 'Mobile Money' | 'Corporate Account';
+/**
+ * 'Mobile Money' is MTN/Zamtel and any other network; 'Airtel Money' is kept
+ * separate so Airtel takings can be banked and checked on their own. Both count
+ * as mobile money in every total — use the helpers in lib/payments.
+ */
+export type PaymentMethod = 'Cash' | 'Airtel Money' | 'Mobile Money' | 'Corporate Account';
 /**
  * 'In Progress'    — car checked in, being washed, no money taken yet.
  * 'Pending Payment'— finished and billed to a corporate account, not yet settled.
@@ -94,6 +103,18 @@ export interface Transaction {
   /** Assigned at completion — who actually washed the car. */
   assignedWashers?: { id: string; name: string }[];
   status: TransactionStatus;
+
+  // --- Wash details (optional, from check-in) ---
+  /** Bay or lane the car was put in, e.g. "2". */
+  bayNumber?: string;
+  vehicleMake?: string;
+  vehicleModel?: string;
+  /** Seconds from check-in to payment, set at completion. */
+  washDurationSeconds?: number;
+
+  // --- Receipt delivery ---
+  receiptDeliveryStatus?: ReceiptDeliveryStatus;
+  receiptDeliveryError?: string;
 
   // --- Completion ---
   /** When the wash was finished and payment taken. */
@@ -176,4 +197,96 @@ export interface CashUp {
   closedAt: string;
   closedByUid: string;
   closedByName: string;
+}
+
+export type ReceiptDeliveryStatus = 'Sent' | 'Failed';
+
+// ---------------------------------------------------------------------------
+// Customers & loyalty
+// ---------------------------------------------------------------------------
+
+export type CustomerTier = 'Bronze' | 'Silver' | 'Gold' | 'Platinum';
+
+/** Tier thresholds in points (1 point per K1 spent). */
+export const TIER_THRESHOLDS: Record<CustomerTier, number> = {
+  Bronze: 0,
+  Silver: 100,
+  Gold: 300,
+  Platinum: 700,
+};
+
+export function calcTier(points: number): CustomerTier {
+  if (points >= TIER_THRESHOLDS.Platinum) return 'Platinum';
+  if (points >= TIER_THRESHOLDS.Gold) return 'Gold';
+  if (points >= TIER_THRESHOLDS.Silver) return 'Silver';
+  return 'Bronze';
+}
+
+/** Points earned for a paid wash: 1 point per full K1. */
+export function calcPointsEarned(amountZmw: number): number {
+  return Math.max(0, Math.floor(amountZmw));
+}
+
+/**
+ * A regular customer, keyed by phone number (digits only, 260… format) so the
+ * same person is one record however many cars they bring.
+ */
+export interface Customer {
+  id: string;
+  name: string;
+  phoneNumber: string;
+  totalPoints: number;
+  totalVisits: number;
+  /** Total spend in ZMW across paid washes. */
+  totalSpend: number;
+  tier: CustomerTier;
+  /** Plates seen with this customer. */
+  plates?: string[];
+  createdAt?: string;
+  lastVisitAt?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Expenses & banking
+// ---------------------------------------------------------------------------
+
+export type ExpenseSource = 'Cash' | 'Airtel Money' | 'Mobile Money' | 'Bank';
+
+export const EXPENSE_CATEGORIES = [
+  'Cleaning supplies',
+  'Fuel',
+  'Water & electricity',
+  'Wages & tips',
+  'Repairs & maintenance',
+  'Food & drink',
+  'Other',
+] as const;
+
+export type ExpenseCategory = (typeof EXPENSE_CATEGORIES)[number];
+
+export interface Expense {
+  id: string;
+  /** Local date, YYYY-MM-DD. */
+  date: string;
+  description: string;
+  category: ExpenseCategory;
+  /** Amount in ZMW. */
+  amount: number;
+  /** Where the money came from — cash expenses reduce what is left to bank. */
+  source: ExpenseSource;
+  userId: string;
+  userName: string;
+  createdAt: string;
+}
+
+/** Money taken out of the business to the bank, for the banking record. */
+export interface BankDeposit {
+  id: string;
+  date: string;
+  amount: number;
+  reference?: string;
+  note?: string;
+  userId: string;
+  userName: string;
+  createdAt: string;
 }

@@ -4,8 +4,12 @@ import React, { useEffect } from "react";
 import { useUser } from "@/firebase/auth/use-user";
 import { usePathname, useRouter } from "next/navigation";
 import {
+  BarChart3,
   Briefcase,
   Calculator,
+  ReceiptText,
+  Trophy,
+  Wallet,
   Car,
   Home,
   Loader2,
@@ -33,6 +37,9 @@ import { SyncIndicator } from "./sync-indicator";
 const adminNav = [
   { href: "/admin", icon: Home, label: "Dashboard" },
   { href: "/admin/cash-up", icon: Calculator, label: "Cash Up" },
+  { href: "/admin/reports", icon: BarChart3, label: "Reports" },
+  { href: "/admin/banking", icon: ReceiptText, label: "Expenses & Banking" },
+  { href: "/admin/customers", icon: Trophy, label: "Customers" },
   { href: "/admin/corporate", icon: Briefcase, label: "Corporate" },
   { href: "/admin/services", icon: Wrench, label: "Services" },
   { href: "/admin/users", icon: Users, label: "Users" },
@@ -42,6 +49,7 @@ const adminNav = [
 
 const attendantNav = [
   { href: "/dashboard", icon: Car, label: "New Wash" },
+  { href: "/dashboard/summary", icon: Wallet, label: "My Shift" },
 ];
 
 export function DashboardLayout({ children }: { children: React.ReactNode }) {

@@ -116,7 +116,17 @@ service cloud.firestore {
     match /vehicles/{vehicleId} {
       allow get, list: if isSignedIn();
       allow create: if isSignedIn();
-      allow update, delete: if isAdmin() && isExistingDoc();
+      // Attendants may fill in or correct a car's details at check-in (make,
+      // model, owner, phone, WhatsApp consent, photo) but never change its plate
+      // or anything else. Admins may change anything.
+      allow update: if isExistingDoc()
+                    && (isAdmin()
+                        || (isSignedIn()
+                            && request.resource.data.licensePlate == resource.data.licensePlate
+                            && request.resource.data.diff(resource.data).affectedKeys()
+                                 .hasOnly(['type', 'make', 'model', 'ownerName', 'phoneNumber',
+                                           'whatsappReceiptConsent', 'photoDataUri'])));
+      allow delete: if isAdmin() && isExistingDoc();
     }
 
     /**
@@ -219,6 +229,42 @@ service cloud.firestore {
       allow get, list: if isSignedIn();
       allow create, update: if isAdmin() && request.resource.data.closedByUid == request.auth.uid;
       allow delete: if false;
+    }
+
+    /**
+     * @description Loyalty customers, keyed by phone number. Updated by the
+     * attendant who completes a paid wash. Attendants may only ever ADD points
+     * and visits — never reduce them — so a record can't be wiped from the bay.
+     */
+    match /customers/{phone} {
+      allow get, list: if isSignedIn();
+      allow create: if isSignedIn()
+                    && request.resource.data.phoneNumber == phone
+                    && request.resource.data.totalPoints is number
+                    && request.resource.data.totalPoints >= 0;
+      allow update: if isExistingDoc()
+                    && (isAdmin()
+                        || (isSignedIn()
+                            && request.resource.data.phoneNumber == resource.data.phoneNumber
+                            && request.resource.data.totalPoints >= resource.data.totalPoints
+                            && request.resource.data.totalVisits >= resource.data.totalVisits));
+      allow delete: if isAdmin();
+    }
+
+    /**
+     * @description Business expenses and bank deposits. Admin-only: they move
+     * the profit and banking figures.
+     */
+    match /expenses/{expenseId} {
+      allow get, list: if isAdmin();
+      allow create: if isAdmin() && request.resource.data.userId == request.auth.uid;
+      allow update, delete: if isAdmin() && isExistingDoc();
+    }
+
+    match /bankDeposits/{depositId} {
+      allow get, list: if isAdmin();
+      allow create: if isAdmin() && request.resource.data.userId == request.auth.uid;
+      allow update, delete: if isAdmin() && isExistingDoc();
     }
 
     /**
