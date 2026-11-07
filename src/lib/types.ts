@@ -17,8 +17,12 @@ export interface Vehicle {
   id?: string;
   licensePlate: string;
   type: 'Sedan' | 'SUV' | 'Truck' | 'Minibus';
+  make?: string;
+  model?: string;
   ownerName?: string;
   phoneNumber?: string;
+  /** The customer agreed to get receipts on WhatsApp. Required for automatic sending. */
+  whatsappReceiptConsent?: boolean;
   photoDataUri?: string;
 }
 
@@ -94,6 +98,18 @@ export interface Transaction {
   /** Assigned at completion — who actually washed the car. */
   assignedWashers?: { id: string; name: string }[];
   status: TransactionStatus;
+
+  // --- Wash details (optional, from check-in) ---
+  /** Bay or lane the car was put in, e.g. "2". */
+  bayNumber?: string;
+  vehicleMake?: string;
+  vehicleModel?: string;
+  /** Seconds from check-in to payment, set at completion. */
+  washDurationSeconds?: number;
+
+  // --- Receipt delivery ---
+  receiptDeliveryStatus?: ReceiptDeliveryStatus;
+  receiptDeliveryError?: string;
 
   // --- Completion ---
   /** When the wash was finished and payment taken. */
@@ -176,4 +192,94 @@ export interface CashUp {
   closedAt: string;
   closedByUid: string;
   closedByName: string;
+}
+
+export type ReceiptDeliveryStatus = 'Sent' | 'Failed';
+
+// ---------------------------------------------------------------------------
+// Customers & loyalty
+// ---------------------------------------------------------------------------
+
+export type CustomerTier = 'Bronze' | 'Silver' | 'Gold' | 'Platinum';
+
+/** Tier thresholds in points (1 point per car washed). */
+export const TIER_THRESHOLDS: Record<CustomerTier, number> = {
+  Bronze: 0,
+  Silver: 5,
+  Gold: 15,
+  Platinum: 30,
+};
+
+export function calcTier(points: number): CustomerTier {
+  if (points >= TIER_THRESHOLDS.Platinum) return 'Platinum';
+  if (points >= TIER_THRESHOLDS.Gold) return 'Gold';
+  if (points >= TIER_THRESHOLDS.Silver) return 'Silver';
+  return 'Bronze';
+}
+
+/** Points earned per car washed. */
+export const POINTS_PER_WASH = 1;
+
+/**
+ * A regular customer, keyed by phone number (digits only, 260… format) so the
+ * same person is one record however many cars they bring.
+ */
+export interface Customer {
+  id: string;
+  name: string;
+  phoneNumber: string;
+  totalPoints: number;
+  totalVisits: number;
+  /** Total spend in ZMW across paid washes. */
+  totalSpend: number;
+  tier: CustomerTier;
+  /** Plates seen with this customer. */
+  plates?: string[];
+  createdAt?: string;
+  lastVisitAt?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Expenses & banking
+// ---------------------------------------------------------------------------
+
+export type ExpenseSource = 'Cash' | 'Mobile Money' | 'Bank';
+
+export const EXPENSE_CATEGORIES = [
+  'Cleaning supplies',
+  'Fuel',
+  'Water & electricity',
+  'Wages & tips',
+  'Repairs & maintenance',
+  'Food & drink',
+  'Other',
+] as const;
+
+export type ExpenseCategory = (typeof EXPENSE_CATEGORIES)[number];
+
+export interface Expense {
+  id: string;
+  /** Local date, YYYY-MM-DD. */
+  date: string;
+  description: string;
+  category: ExpenseCategory;
+  /** Amount in ZMW. */
+  amount: number;
+  /** Where the money came from — cash expenses reduce what is left to bank. */
+  source: ExpenseSource;
+  userId: string;
+  userName: string;
+  createdAt: string;
+}
+
+/** Money taken out of the business to the bank, for the banking record. */
+export interface BankDeposit {
+  id: string;
+  date: string;
+  amount: number;
+  reference?: string;
+  note?: string;
+  userId: string;
+  userName: string;
+  createdAt: string;
 }

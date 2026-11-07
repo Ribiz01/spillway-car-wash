@@ -17,9 +17,11 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { useToast } from "@/hooks/use-toast";
-import type { Service, Vehicle, Transaction } from "@/lib/types";
+import { calcTier, type Customer, type Service, type Vehicle, type Transaction } from "@/lib/types";
+import { findCustomer, normalizePhone } from "@/lib/customers";
+import { Badge } from "../ui/badge";
 import { formatCurrency } from "@/lib/utils";
-import { Check, ChevronLeft, ChevronRight, Loader2, Sparkles, Wind, Droplets, Car, Camera, Image as ImageIcon, Disc, Star, CloudOff } from "lucide-react";
+import { Check, ChevronLeft, ChevronRight, Loader2, Sparkles, Wind, Droplets, Car, Camera, Image as ImageIcon, Disc, Star, CloudOff, Pencil, Trophy } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
 import { Checkbox } from "../ui/checkbox";
 import { Skeleton } from "../ui/skeleton";
@@ -33,13 +35,24 @@ const vehicleSchema = z.object({
 const newVehicleSchema = z.object({
   licensePlate: z.string().min(3).toUpperCase(),
   type: z.enum(["Sedan", "SUV", "Truck", "Minibus"]),
+  make: z.string().optional(),
+  model: z.string().optional(),
   ownerName: z.string().optional(),
   phoneNumber: z.string().optional(),
+  whatsappReceiptConsent: z.boolean().default(false),
 });
 
 const servicesSchema = z.object({
   selectedServices: z.array(z.string()).min(1, "Please select at least one service."),
+  bayNumber: z.string().optional(),
 });
+
+const tierStyles: Record<string, string> = {
+  Platinum: "border-purple-400 text-purple-700",
+  Gold: "border-amber-400 text-amber-700",
+  Silver: "border-slate-400 text-slate-600",
+  Bronze: "border-orange-300 text-orange-700",
+};
 
 type Step = "vehicle" | "new-vehicle" | "services";
 
@@ -76,6 +89,9 @@ export function Workflow() {
   const [isFindingVehicle, setIsFindingVehicle] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isNewVehicleSaved, setIsNewVehicleSaved] = useState(false);
+  /** True when the details form is editing a vehicle that already exists. */
+  const [isEditingExisting, setIsEditingExisting] = useState(false);
+  const [customer, setCustomer] = useState<Customer | null>(null);
 
   const { user } = useUser();
   const firestore = useFirestore();
@@ -107,14 +123,17 @@ export function Workflow() {
     defaultValues: {
       licensePlate: "",
       type: "Sedan",
+      make: "",
+      model: "",
       ownerName: "",
       phoneNumber: "",
+      whatsappReceiptConsent: false,
     },
   });
 
   const servicesForm = useForm<z.infer<typeof servicesSchema>>({
     resolver: zodResolver(servicesSchema),
-    defaultValues: { selectedServices: [] },
+    defaultValues: { selectedServices: [], bayNumber: "" },
   });
 
   const handleVehicleSubmit = async (data: z.infer<typeof vehicleSchema>) => {
@@ -158,10 +177,16 @@ export function Workflow() {
       if (!querySnapshot.empty) {
         const found = { id: querySnapshot.docs[0].id, ...querySnapshot.docs[0].data() } as Vehicle;
         setCurrentVehicle(found);
+        setIsEditingExisting(false);
         setStep("services");
+        // Loyalty lookup runs after the step change so a slow link never holds
+        // up the check-in; the badge simply appears when it arrives.
+        findCustomer(firestore, found.phoneNumber).then(setCustomer);
       } else {
         newVehicleForm.setValue("licensePlate", data.licensePlate);
         setIsNewVehicleSaved(false);
+        setIsEditingExisting(false);
+        setCustomer(null);
         setStep("new-vehicle");
       }
     } catch (error) {
@@ -177,8 +202,15 @@ export function Workflow() {
     // Firestore rejects `undefined` field values and does so SYNCHRONOUSLY, before
     // setDoc() ever returns a promise — so a `.catch()` below would not see it and
     // the whole handler would throw. Omit the key entirely when there is no photo.
+    const phone = normalizePhone(data.phoneNumber);
     const newVehicle: Omit<Vehicle, 'id'> = {
-      ...data,
+      licensePlate: data.licensePlate,
+      type: data.type,
+      make: data.make?.trim() ?? '',
+      model: data.model?.trim() ?? '',
+      ownerName: data.ownerName?.trim() ?? '',
+      phoneNumber: phone,
+      whatsappReceiptConsent: !!phone && data.whatsappReceiptConsent,
       ...(vehiclePhotoUri ? { photoDataUri: vehiclePhotoUri } : {}),
     };
     const vehicleRef = doc(firestore, 'vehicles', data.licensePlate);
@@ -186,20 +218,28 @@ export function Workflow() {
     // Non-blocking write: Firestore resolves this promise only after the SERVER
     // acknowledges, which never happens offline. We commit to local cache and
     // move on; the SDK replays the write when connectivity returns.
-    setDoc(vehicleRef, newVehicle).catch(() => {
+    // merge: editing an existing car only touches the fields on this form.
+    setDoc(vehicleRef, newVehicle, { merge: true }).catch(() => {
       errorEmitter.emit(
         'permission-error',
         new FirestorePermissionError({
           path: `vehicles/${data.licensePlate}`,
-          operation: 'create',
+          operation: isEditingExisting ? 'update' : 'create',
           requestResourceData: newVehicle,
         })
       );
     });
 
-    setCurrentVehicle({ id: data.licensePlate, ...newVehicle });
+    setCurrentVehicle((prev) => ({ ...(prev ?? {}), id: data.licensePlate, ...newVehicle }));
     setIsNewVehicleSaved(true);
     setIsSubmitting(false);
+    findCustomer(firestore, phone).then(setCustomer);
+    if (isEditingExisting) {
+      toast({ title: "Details updated", description: `${data.licensePlate} has been updated.` });
+      setIsEditingExisting(false);
+      setStep("services");
+      return;
+    }
     toast({
       title: "Vehicle Registered",
       description: !isWorkingOffline
@@ -226,6 +266,10 @@ export function Workflow() {
       userId: user.uid,
       userName: user.profile?.name || user.email || 'Unknown',
       status: 'In Progress',
+      // Optional extras, only written when known (Firestore rejects undefined).
+      ...(data.bayNumber?.trim() ? { bayNumber: data.bayNumber.trim() } : {}),
+      ...(currentVehicle.make ? { vehicleMake: currentVehicle.make } : {}),
+      ...(currentVehicle.model ? { vehicleModel: currentVehicle.model } : {}),
     };
 
     // Generate the document ID locally rather than letting addDoc round-trip to
@@ -295,11 +339,31 @@ export function Workflow() {
     }
   };
 
+  /** Opens the details form for a car that's already on file. */
+  const editCurrentVehicle = () => {
+    if (!currentVehicle) return;
+    newVehicleForm.reset({
+      licensePlate: currentVehicle.licensePlate,
+      type: currentVehicle.type || "Sedan",
+      make: currentVehicle.make || "",
+      model: currentVehicle.model || "",
+      ownerName: currentVehicle.ownerName || "",
+      phoneNumber: currentVehicle.phoneNumber || "",
+      whatsappReceiptConsent: !!currentVehicle.whatsappReceiptConsent,
+    });
+    setVehiclePhotoUri(currentVehicle.photoDataUri || null);
+    setIsNewVehicleSaved(false);
+    setIsEditingExisting(true);
+    setStep("new-vehicle");
+  };
+
   const startNew = () => {
     vehicleForm.reset({ licensePlate: "" });
-    newVehicleForm.reset({ licensePlate: "", type: "Sedan", ownerName: "", phoneNumber: "" });
-    servicesForm.reset({ selectedServices: [] });
+    newVehicleForm.reset({ licensePlate: "", type: "Sedan", make: "", model: "", ownerName: "", phoneNumber: "", whatsappReceiptConsent: false });
+    servicesForm.reset({ selectedServices: [], bayNumber: "" });
     setCurrentVehicle(null);
+    setCustomer(null);
+    setIsEditingExisting(false);
     setVehiclePhotoUri(null);
     setIsNewVehicleSaved(false);
     setStep("vehicle");
@@ -370,8 +434,8 @@ export function Workflow() {
             <motion.div {...motionProps}>
             <Card>
             <CardHeader>
-              <CardTitle>Register New Vehicle</CardTitle>
-              <CardDescription>This license plate is not in our system. Please add the vehicle details.</CardDescription>
+              <CardTitle>{isEditingExisting ? "Update Vehicle Details" : "Register New Vehicle"}</CardTitle>
+              <CardDescription>{isEditingExisting ? "Fix or fill in this car's details. The phone number is what links it to loyalty points and WhatsApp receipts." : "This license plate is not in our system. Please add the vehicle details."}</CardDescription>
             </CardHeader>
             <CardContent>
               <Form {...newVehicleForm}>
@@ -418,20 +482,39 @@ export function Workflow() {
                       <FormMessage />
                     </FormItem>
                   )}/>
+                  <div className="grid grid-cols-2 gap-3">
+                    <FormField control={newVehicleForm.control} name="make" render={({ field }) => (
+                      <FormItem><FormLabel>Make (Optional)</FormLabel><FormControl><Input placeholder="Toyota" {...field} disabled={isSubmitting || isNewVehicleSaved}/></FormControl><FormMessage /></FormItem>
+                    )}/>
+                    <FormField control={newVehicleForm.control} name="model" render={({ field }) => (
+                      <FormItem><FormLabel>Model (Optional)</FormLabel><FormControl><Input placeholder="Corolla" {...field} disabled={isSubmitting || isNewVehicleSaved}/></FormControl><FormMessage /></FormItem>
+                    )}/>
+                  </div>
                   <FormField control={newVehicleForm.control} name="ownerName" render={({ field }) => (
                     <FormItem><FormLabel>Owner Name (Optional)</FormLabel><FormControl><Input placeholder="John Doe" {...field} disabled={isSubmitting || isNewVehicleSaved}/></FormControl><FormMessage /></FormItem>
                   )}/>
                    <FormField control={newVehicleForm.control} name="phoneNumber" render={({ field }) => (
-                    <FormItem><FormLabel>Phone Number (for WhatsApp)</FormLabel><FormControl><Input placeholder="260977123456" {...field} disabled={isSubmitting || isNewVehicleSaved} /></FormControl><FormMessage /></FormItem>
+                    <FormItem><FormLabel>Phone Number (for WhatsApp &amp; loyalty points)</FormLabel><FormControl><Input inputMode="tel" placeholder="0977 123 456" {...field} disabled={isSubmitting || isNewVehicleSaved} /></FormControl><FormMessage /></FormItem>
+                  )}/>
+                  <FormField control={newVehicleForm.control} name="whatsappReceiptConsent" render={({ field }) => (
+                    <FormItem className="flex flex-row items-start gap-3 space-y-0 rounded-md border p-3">
+                      <FormControl>
+                        <Checkbox checked={field.value} onCheckedChange={(v) => field.onChange(v === true)} disabled={isSubmitting || isNewVehicleSaved} />
+                      </FormControl>
+                      <div className="space-y-1 leading-none">
+                        <FormLabel className="font-normal">Customer agrees to get receipts on WhatsApp</FormLabel>
+                        <p className="text-xs text-muted-foreground">Ask them first. Without this, receipts are only sent when you tap Send on WhatsApp.</p>
+                      </div>
+                    </FormItem>
                   )}/>
                   <div className="flex gap-2">
-                    <Button type="button" variant="outline" onClick={() => setStep("vehicle")} disabled={isSubmitting || isNewVehicleSaved}>
+                    <Button type="button" variant="outline" onClick={() => { setStep(isEditingExisting ? "services" : "vehicle"); setIsEditingExisting(false); }} disabled={isSubmitting || isNewVehicleSaved}>
                       <ChevronLeft className="mr-2" />Back
                     </Button>
                     {!isNewVehicleSaved ? (
                         <Button type="submit" disabled={isSubmitting}>
                             {isSubmitting && <Loader2 className="mr-2 animate-spin" />}
-                            Register Vehicle
+                            {isEditingExisting ? "Save Details" : "Register Vehicle"}
                         </Button>
                     ) : (
                         <Button type="button" onClick={() => setStep("services")}>
@@ -461,9 +544,43 @@ export function Workflow() {
                                 this when you take payment.
                             </CardDescription>
                         </CardHeader>
-                        <CardContent>
+                        <CardContent className="space-y-4">
+                        {currentVehicle && (
+                            <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border bg-muted/40 p-3">
+                                <div className="min-w-0">
+                                    <p className="font-semibold">
+                                        {currentVehicle.licensePlate}
+                                        <span className="ml-2 font-normal text-muted-foreground">
+                                            {[currentVehicle.make, currentVehicle.model].filter(Boolean).join(" ") || currentVehicle.type}
+                                        </span>
+                                    </p>
+                                    <p className="truncate text-xs text-muted-foreground">
+                                        {currentVehicle.ownerName || "No owner name"} · {currentVehicle.phoneNumber || "no phone number"}
+                                    </p>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                    {customer ? (
+                                        <Badge variant="outline" className={tierStyles[calcTier(customer.totalPoints)]}>
+                                            <Trophy className="mr-1 h-3 w-3" />
+                                            {calcTier(customer.totalPoints)} · {customer.totalPoints} pts · {customer.totalVisits} visits
+                                        </Badge>
+                                    ) : currentVehicle.phoneNumber ? (
+                                        <Badge variant="outline">First visit for loyalty</Badge>
+                                    ) : null}
+                                    <Button type="button" size="sm" variant="ghost" onClick={editCurrentVehicle}>
+                                        <Pencil className="mr-1 h-3.5 w-3.5" /> Edit
+                                    </Button>
+                                </div>
+                            </div>
+                        )}
                         <Form {...servicesForm}>
-                            <form onSubmit={servicesForm.handleSubmit(handleCheckIn)}>
+                            <form onSubmit={servicesForm.handleSubmit(handleCheckIn)} className="space-y-4">
+                                <FormField control={servicesForm.control} name="bayNumber" render={({ field }) => (
+                                    <FormItem className="max-w-[200px]">
+                                        <FormLabel>Bay (Optional)</FormLabel>
+                                        <FormControl><Input placeholder="e.g. 2" {...field} /></FormControl>
+                                    </FormItem>
+                                )}/>
                                 <FormField control={servicesForm.control} name="selectedServices" render={() => (
                                     <FormItem className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                                         {isLoadingServices && <>

@@ -10,6 +10,8 @@ import { useSyncStatus } from '@/firebase/sync-status';
 import type { CorporateAccount, PaymentMethod, Service, Transaction, Vehicle, Washer } from '@/lib/types';
 import { cn, formatCurrency } from '@/lib/utils';
 import { methodsUsed, moneyEquals, roundMoney, transactionPayments } from '@/lib/payments';
+import { findCustomer, recordLoyaltyVisit } from '@/lib/customers';
+import { calcTier } from '@/lib/types';
 import type { Payment } from '@/lib/types';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -30,7 +32,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { useToast } from '@/hooks/use-toast';
-import { Car, Check, Clock, Loader2, TriangleAlert, CloudOff, Plus, X, Share2, Ban } from 'lucide-react';
+import { Car, Check, Clock, Loader2, TriangleAlert, CloudOff, Plus, X, Share2, Ban, Trophy, Send } from 'lucide-react';
 
 /**
  * One line of a possibly-split payment. Amount is held as a string because it is
@@ -118,6 +120,9 @@ export function ActiveJobs() {
   /** The job being cancelled, and why. */
   const [cancelling, setCancelling] = useState<Transaction | null>(null);
   const [cancelReason, setCancelReason] = useState('');
+  /** Loyalty points earned on the wash just completed, for the receipt. */
+  const [pointsEarned, setPointsEarned] = useState<{ points: number; total: number } | null>(null);
+  const [isSending, setIsSending] = useState(false);
 
   // Equality on `status` alone — no orderBy — so this is served by the automatic
   // single-field index and needs nothing deployed. Sorted client-side below.
@@ -156,6 +161,14 @@ export function ActiveJobs() {
     [firestore, receipt]
   );
   const { data: receiptVehicle } = useDoc<Vehicle>(receiptVehicleRef);
+
+  // The vehicle of the job being completed — its phone number links the wash to
+  // the customer's loyalty record.
+  const jobVehicleRef = useMemoFirebase(
+    () => (firestore && job ? doc(firestore, 'vehicles', job.licensePlate) : null),
+    [firestore, job]
+  );
+  const { data: jobVehicle } = useDoc<Vehicle>(jobVehicleRef);
 
   // Oldest first: the car that has been waiting longest should be dealt with first.
   const waiting = useMemo(
@@ -219,6 +232,10 @@ export function ActiveJobs() {
       .map((w) => ({ id: w.id, name: w.name }));
 
     const completedAt = new Date().toISOString();
+    const washDurationSeconds = Math.max(
+      0,
+      Math.round((Date.parse(completedAt) - Date.parse(job.timestamp)) / 1000)
+    );
 
     // Every value is a concrete string/number/array — Firestore rejects
     // `undefined` synchronously, so optional keys are spread in conditionally.
@@ -246,6 +263,7 @@ export function ActiveJobs() {
       paymentMethods: methodsUsed(payments),
       status: corporateLine ? 'Pending Payment' : 'Completed',
       completedAt,
+      ...(Number.isFinite(washDurationSeconds) ? { washDurationSeconds } : {}),
       completedByUid: user.uid,
       completedByName: user.profile?.name || user.email || 'Unknown',
       // Kept at the top level too so the corporate screens can group and label
@@ -268,8 +286,27 @@ export function ActiveJobs() {
       });
       // Hand straight to the receipt: the customer is still standing there, and
       // this is the only moment they can be given one.
-      setReceipt({ ...job, ...update } as Transaction);
+      const completed = { ...job, ...update } as Transaction;
+      setReceipt(completed);
       setJob(null);
+
+      // Loyalty: 1 point per car washed, whoever pays (cash, MoMo or company).
+      // Fire-and-forget so a slow network never delays the receipt.
+      setPointsEarned(null);
+      const vehicle = jobVehicle;
+      if (vehicle?.phoneNumber) {
+        findCustomer(firestore, vehicle.phoneNumber).then((previous) => {
+          const points = recordLoyaltyVisit(firestore, vehicle, completed.totalAmount, previous);
+          if (points > 0) setPointsEarned({ points, total: (previous?.totalPoints ?? 0) + points });
+        });
+      }
+
+      // Customers who agreed to WhatsApp receipts get one straight away, when
+      // the WhatsApp API is set up on the server. Otherwise the button below
+      // opens WhatsApp as before.
+      if (vehicle?.phoneNumber && vehicle.whatsappReceiptConsent && !isWorkingOffline) {
+        sendViaApi(completed.id, true);
+      }
     } catch (e: any) {
       toast({
         title: 'Could not complete this wash',
@@ -311,8 +348,50 @@ export function ActiveJobs() {
     }
   };
 
-  const shareReceipt = () => {
+  /**
+   * Sends the receipt from the business WhatsApp number via /api/send-receipt.
+   * Returns false when the API isn't configured or fails, so the caller can
+   * fall back to opening WhatsApp on this device.
+   */
+  const sendViaApi = async (transactionId: string, quiet = false): Promise<boolean> => {
+    if (!user || !firestore) return false;
+    setIsSending(true);
+    try {
+      const response = await fetch('/api/send-receipt', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${await user.getIdToken()}`,
+        },
+        body: JSON.stringify({ transactionId }),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (response.status === 503) return false; // not configured — use wa.me
+      const ok = response.ok;
+      updateDoc(doc(firestore, 'transactions', transactionId), {
+        receiptDeliveryStatus: ok ? 'Sent' : 'Failed',
+        receiptDeliveryError: ok ? '' : String(result.error || 'Receipt delivery failed.'),
+      }).catch(() => {});
+      if (ok) {
+        toast({ title: 'Receipt sent on WhatsApp' });
+      } else if (!quiet) {
+        toast({
+          title: 'WhatsApp receipt not sent',
+          description: String(result.error || 'Opening WhatsApp on this device instead.'),
+          variant: 'destructive',
+        });
+      }
+      return ok;
+    } catch {
+      return false;
+    } finally {
+      setIsSending(false);
+    }
+  };
+
+  const shareReceipt = async () => {
     if (!receipt) return;
+    if (receiptVehicle?.whatsappReceiptConsent && (await sendViaApi(receipt.id))) return;
     const phone = receiptVehicle?.phoneNumber?.replace(/[^0-9]/g, '');
     if (!phone) return;
 
@@ -335,6 +414,9 @@ export function ActiveJobs() {
       `Receipt ID: ${receipt.id}`,
       `Date: ${new Date(receipt.completedAt ?? receipt.timestamp).toLocaleString()}`,
       `License Plate: ${receipt.licensePlate}`,
+      ...(receipt.vehicleMake || receipt.vehicleModel
+        ? [`Vehicle: ${[receipt.vehicleMake, receipt.vehicleModel].filter(Boolean).join(' ')}`]
+        : []),
       '',
       '*Services:*',
       ...services,
@@ -345,6 +427,9 @@ export function ActiveJobs() {
       '---------------------------',
       `*TOTAL: ${formatCurrency(receipt.totalAmount)}*`,
       `Status: ${receipt.status}`,
+      ...(pointsEarned
+        ? [`Loyalty: +${pointsEarned.points} pts (total ${pointsEarned.total}, ${calcTier(pointsEarned.total)})`]
+        : []),
       '---------------------------',
       '',
       'Thank you for your business!',
@@ -405,12 +490,17 @@ export function ActiveJobs() {
                     <div className="flex items-center gap-2">
                       <Car className="h-4 w-4 shrink-0 text-muted-foreground" />
                       <span className="font-semibold">{j.licensePlate}</span>
+                      {j.bayNumber && (
+                        <Badge variant="secondary" className="text-xs font-normal">Bay {j.bayNumber}</Badge>
+                      )}
                       <Badge variant="outline" className="gap-1 text-xs font-normal">
                         <Clock className="h-3 w-3" />
                         {waitLabel(j.timestamp)}
                       </Badge>
                     </div>
                     <p className="mt-1 truncate text-xs text-muted-foreground">
+                      {[j.vehicleMake, j.vehicleModel].filter(Boolean).join(' ')}
+                      {j.vehicleMake || j.vehicleModel ? ' · ' : ''}
                       {j.services.map((s) => s.name).join(', ')}
                       {j.userName ? ` · in by ${j.userName}` : ''}
                     </p>
@@ -761,6 +851,17 @@ export function ActiveJobs() {
                 <span>{formatCurrency(receipt.totalAmount)}</span>
               </div>
 
+              {pointsEarned && (
+                <div className="flex items-center justify-between rounded-md border border-amber-400/40 bg-amber-400/10 p-2.5 text-amber-800">
+                  <span className="flex items-center gap-1.5">
+                    <Trophy className="h-4 w-4" /> +{pointsEarned.points} loyalty point{pointsEarned.points === 1 ? '' : 's'}
+                  </span>
+                  <span className="text-xs">
+                    {pointsEarned.total} pts · {calcTier(pointsEarned.total)}
+                  </span>
+                </div>
+              )}
+
               {receipt.status === 'Pending Payment' && (
                 <p className="text-xs text-destructive">
                   Part of this wash is on account and is still owed.
@@ -774,9 +875,16 @@ export function ActiveJobs() {
               className="w-full"
               variant="outline"
               onClick={shareReceipt}
-              disabled={!receiptVehicle?.phoneNumber}
+              disabled={!receiptVehicle?.phoneNumber || isSending}
             >
-              <Share2 className="mr-2 h-4 w-4" /> Send on WhatsApp
+              {isSending ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : receiptVehicle?.whatsappReceiptConsent ? (
+                <Send className="mr-2 h-4 w-4" />
+              ) : (
+                <Share2 className="mr-2 h-4 w-4" />
+              )}
+              Send on WhatsApp
             </Button>
             {!receiptVehicle?.phoneNumber && (
               <p className="text-center text-xs text-muted-foreground">
