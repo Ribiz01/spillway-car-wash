@@ -68,3 +68,60 @@ export function describeMethods(t: Transaction): string {
   if (methods.length === 0) return '—';
   return methods.join(' + ');
 }
+
+/** Every method an attendant can pick at the till, in display order. */
+export const PAYMENT_METHODS: PaymentMethod[] = [
+  'Cash',
+  'Mobile Money',
+  'Airtel Money',
+  'Bank Transfer',
+  'Other',
+  'Corporate Account',
+];
+
+/**
+ * Money that was really received but never touches the drawer. These are
+ * reconciled against a statement rather than counted, so cash-up groups them.
+ */
+export const ELECTRONIC_METHODS: PaymentMethod[] = [
+  'Mobile Money',
+  'Airtel Money',
+  'Bank Transfer',
+  'Other',
+];
+
+/** Methods that are only reconcilable with a reference number. */
+export function requiresReference(method: PaymentMethod): boolean {
+  return method === 'Mobile Money' || method === 'Airtel Money' || method === 'Bank Transfer';
+}
+
+export function isElectronic(method: PaymentMethod): boolean {
+  return ELECTRONIC_METHODS.includes(method);
+}
+
+/** The non-cash, non-account portion of a wash. */
+export function electronicAmount(t: Transaction): number {
+  return transactionPayments(t)
+    .filter((p) => isElectronic(p.method))
+    .reduce((acc, p) => acc + p.amount, 0);
+}
+
+/** What the customer actually handed over — everything except the on-account portion. */
+export function paidAmount(t: Transaction): number {
+  return roundMoney(
+    transactionPayments(t)
+      .filter((p) => p.method !== 'Corporate Account')
+      .reduce((acc, p) => acc + p.amount, 0)
+  );
+}
+
+/** Received totals per method across many transactions, for banking tables. */
+export function totalsByMethod(rows: Transaction[]): Record<PaymentMethod, number> {
+  const totals = Object.fromEntries(PAYMENT_METHODS.map((m) => [m, 0])) as Record<PaymentMethod, number>;
+  for (const t of rows) {
+    for (const p of transactionPayments(t)) {
+      totals[p.method] = roundMoney((totals[p.method] ?? 0) + p.amount);
+    }
+  }
+  return totals;
+}

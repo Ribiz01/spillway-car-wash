@@ -10,6 +10,8 @@ import { useFirestore, useMemoFirebase, FirestorePermissionError, errorEmitter }
 import { useSyncStatus } from '@/firebase/sync-status';
 import { useUser } from "@/firebase/auth/use-user";
 import { useCollection } from "@/firebase/firestore/use-collection";
+import { useDoc } from "@/firebase/firestore/use-doc";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
@@ -17,9 +19,11 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { useToast } from "@/hooks/use-toast";
-import type { Service, Vehicle, Transaction } from "@/lib/types";
+import type { Customer, Service, Vehicle, Transaction, Washer } from "@/lib/types";
 import { formatCurrency } from "@/lib/utils";
-import { Check, ChevronLeft, ChevronRight, Loader2, Sparkles, Wind, Droplets, Car, Camera, Image as ImageIcon, Disc, Star, CloudOff } from "lucide-react";
+import { calcTier, customerIdForPhone, tierClasses } from "@/lib/loyalty";
+import { locationStamp } from "@/lib/locations";
+import { Check, ChevronLeft, ChevronRight, Loader2, Sparkles, Wind, Droplets, Car, Camera, Image as ImageIcon, Disc, Star, CloudOff, Pencil, Trophy } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
 import { Checkbox } from "../ui/checkbox";
 import { Skeleton } from "../ui/skeleton";
@@ -32,13 +36,25 @@ const vehicleSchema = z.object({
 
 const newVehicleSchema = z.object({
   licensePlate: z.string().min(3).toUpperCase(),
+  make: z.string().optional(),
+  model: z.string().optional(),
   type: z.enum(["Sedan", "SUV", "Truck", "Minibus"]),
   ownerName: z.string().optional(),
   phoneNumber: z.string().optional(),
+  whatsappReceiptConsent: z.boolean(),
+}).refine((data) => !data.whatsappReceiptConsent || (data.phoneNumber ?? "").replace(/\D/g, "").length >= 9, {
+  // Consent to be messaged is meaningless without somewhere to send it.
+  message: "Enter the customer's phone number to send receipts on WhatsApp.",
+  path: ["phoneNumber"],
 });
 
 const servicesSchema = z.object({
   selectedServices: z.array(z.string()).min(1, "Please select at least one service."),
+  bayNumber: z.string().optional(),
+  // Optional at check-in: who will wash it is often not decided until the car
+  // is on the ramp. It can be set or changed from Cars On Site at any time
+  // before payment, and at least one washer is required to take payment.
+  assignedWashers: z.array(z.string()),
 });
 
 type Step = "vehicle" | "new-vehicle" | "services";
@@ -76,6 +92,8 @@ export function Workflow() {
   const [isFindingVehicle, setIsFindingVehicle] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isNewVehicleSaved, setIsNewVehicleSaved] = useState(false);
+  /** True while the details form is correcting a known vehicle rather than registering one. */
+  const [isEditingVehicle, setIsEditingVehicle] = useState(false);
 
   const { user } = useUser();
   const firestore = useFirestore();
@@ -89,6 +107,9 @@ export function Workflow() {
   const servicesQuery = useMemoFirebase(() => firestore ? collection(firestore, 'services') : null, [firestore]);
   const { data: allServices, isLoading: isLoadingServices } = useCollection<Service>(servicesQuery);
 
+  const washersQuery = useMemoFirebase(() => firestore ? collection(firestore, 'washers') : null, [firestore]);
+  const { data: allWashers } = useCollection<Washer>(washersQuery);
+
   // Cars currently on site, so the same plate cannot be checked in twice. Same
   // single-field query shape as Cars On Site, so it costs no extra index.
   const activeJobsQuery = useMemoFirebase(
@@ -96,6 +117,16 @@ export function Workflow() {
     [firestore]
   );
   const { data: activeJobs } = useCollection<Transaction>(activeJobsQuery);
+
+  // Loyalty standing of whoever owns the car being checked in. The customer id
+  // is derived from the phone number, so this is a direct document read — it
+  // works from cache offline and simply stays empty for a first-time customer.
+  const customerId = customerIdForPhone(currentVehicle?.phoneNumber);
+  const customerRef = useMemoFirebase(
+    () => (firestore && customerId ? doc(firestore, 'customers', customerId) : null),
+    [firestore, customerId]
+  );
+  const { data: customer } = useDoc<Customer>(customerRef);
 
   const vehicleForm = useForm<z.infer<typeof vehicleSchema>>({
     resolver: zodResolver(vehicleSchema),
@@ -106,15 +137,18 @@ export function Workflow() {
     resolver: zodResolver(newVehicleSchema),
     defaultValues: {
       licensePlate: "",
+      make: "",
+      model: "",
       type: "Sedan",
       ownerName: "",
       phoneNumber: "",
+      whatsappReceiptConsent: false,
     },
   });
 
   const servicesForm = useForm<z.infer<typeof servicesSchema>>({
     resolver: zodResolver(servicesSchema),
-    defaultValues: { selectedServices: [] },
+    defaultValues: { selectedServices: [], bayNumber: "", assignedWashers: [] },
   });
 
   const handleVehicleSubmit = async (data: z.infer<typeof vehicleSchema>) => {
@@ -162,6 +196,7 @@ export function Workflow() {
       } else {
         newVehicleForm.setValue("licensePlate", data.licensePlate);
         setIsNewVehicleSaved(false);
+        setIsEditingVehicle(false);
         setStep("new-vehicle");
       }
     } catch (error) {
@@ -177,10 +212,43 @@ export function Workflow() {
     // Firestore rejects `undefined` field values and does so SYNCHRONOUSLY, before
     // setDoc() ever returns a promise — so a `.catch()` below would not see it and
     // the whole handler would throw. Omit the key entirely when there is no photo.
-    const newVehicle: Omit<Vehicle, 'id'> = {
-      ...data,
+    const details = {
+      make: data.make?.trim() ?? "",
+      model: data.model?.trim() ?? "",
+      ownerName: data.ownerName?.trim() ?? "",
+      phoneNumber: data.phoneNumber?.trim() ?? "",
+      whatsappReceiptConsent: data.whatsappReceiptConsent,
       ...(vehiclePhotoUri ? { photoDataUri: vehiclePhotoUri } : {}),
     };
+    const newVehicle: Omit<Vehicle, 'id'> = {
+      licensePlate: data.licensePlate,
+      type: data.type,
+      ...details,
+    };
+
+    if (isEditingVehicle && currentVehicle?.id) {
+      // Correcting a known vehicle: merge only the customer-facing details. The
+      // security rules allow an attendant to change exactly these keys and
+      // nothing else, so the plate and type are deliberately left out.
+      const existingId = currentVehicle.id;
+      setDoc(doc(firestore, 'vehicles', existingId), details, { merge: true }).catch(() => {
+        errorEmitter.emit(
+          'permission-error',
+          new FirestorePermissionError({
+            path: `vehicles/${existingId}`,
+            operation: 'update',
+            requestResourceData: details,
+          })
+        );
+      });
+      setCurrentVehicle({ ...currentVehicle, ...details });
+      setIsEditingVehicle(false);
+      setIsSubmitting(false);
+      setStep("services");
+      toast({ title: "Details updated", description: `${currentVehicle.licensePlate} has been updated.` });
+      return;
+    }
+
     const vehicleRef = doc(firestore, 'vehicles', data.licensePlate);
 
     // Non-blocking write: Firestore resolves this promise only after the SERVER
@@ -215,9 +283,13 @@ export function Workflow() {
 
     const selectedServices = allServices.filter(s => data.selectedServices.includes(s.id));
     const totalAmount = selectedServices.reduce((acc, s) => acc + s.price, 0);
+    const assignedWashers = (allWashers ?? [])
+      .filter((w) => data.assignedWashers.includes(w.id))
+      .map((w) => ({ id: w.id, name: w.name }));
 
-    // No `payment` key and no washers yet: both are set at completion. Writing a
-    // placeholder payment here would make an unwashed car look like a sale.
+    // No `payment` key yet: it is set at completion. Writing a placeholder
+    // payment here would make an unwashed car look like a sale. Washers are
+    // recorded now if they were chosen, and can still be changed before payment.
     const newJob: Omit<Transaction, 'id'> = {
       timestamp: new Date().toISOString(),
       licensePlate: currentVehicle.licensePlate,
@@ -226,6 +298,17 @@ export function Workflow() {
       userId: user.uid,
       userName: user.profile?.name || user.email || 'Unknown',
       status: 'In Progress',
+      // Copied onto the job so receipts, loyalty and reports need no second read
+      // at the till. Firestore rejects `undefined`, so each is spread in only
+      // when there is a value.
+      ...locationStamp(user.profile),
+      ...(assignedWashers.length > 0 ? { assignedWashers } : {}),
+      ...(currentVehicle.make ? { vehicleMake: currentVehicle.make } : {}),
+      ...(currentVehicle.model ? { vehicleModel: currentVehicle.model } : {}),
+      ...(data.bayNumber?.trim() ? { bayNumber: data.bayNumber.trim() } : {}),
+      ...(currentVehicle.ownerName ? { customerName: currentVehicle.ownerName } : {}),
+      ...(currentVehicle.phoneNumber ? { customerPhone: currentVehicle.phoneNumber } : {}),
+      whatsappReceiptConsent: currentVehicle.whatsappReceiptConsent === true,
     };
 
     // Generate the document ID locally rather than letting addDoc round-trip to
@@ -297,12 +380,31 @@ export function Workflow() {
 
   const startNew = () => {
     vehicleForm.reset({ licensePlate: "" });
-    newVehicleForm.reset({ licensePlate: "", type: "Sedan", ownerName: "", phoneNumber: "" });
-    servicesForm.reset({ selectedServices: [] });
+    newVehicleForm.reset({ licensePlate: "", make: "", model: "", type: "Sedan", ownerName: "", phoneNumber: "", whatsappReceiptConsent: false });
+    servicesForm.reset({ selectedServices: [], bayNumber: "", assignedWashers: [] });
     setCurrentVehicle(null);
     setVehiclePhotoUri(null);
     setIsNewVehicleSaved(false);
+    setIsEditingVehicle(false);
     setStep("vehicle");
+  };
+
+  /** Reopens the details form for a known vehicle, e.g. to add a missing phone number. */
+  const editVehicleDetails = () => {
+    if (!currentVehicle) return;
+    newVehicleForm.reset({
+      licensePlate: currentVehicle.licensePlate,
+      make: currentVehicle.make ?? "",
+      model: currentVehicle.model ?? "",
+      type: currentVehicle.type ?? "Sedan",
+      ownerName: currentVehicle.ownerName ?? "",
+      phoneNumber: currentVehicle.phoneNumber ?? "",
+      whatsappReceiptConsent: currentVehicle.whatsappReceiptConsent === true,
+    });
+    setVehiclePhotoUri(null);
+    setIsNewVehicleSaved(false);
+    setIsEditingVehicle(true);
+    setStep("new-vehicle");
   };
 
   const motionProps = {
@@ -370,8 +472,12 @@ export function Workflow() {
             <motion.div {...motionProps}>
             <Card>
             <CardHeader>
-              <CardTitle>Register New Vehicle</CardTitle>
-              <CardDescription>This license plate is not in our system. Please add the vehicle details.</CardDescription>
+              <CardTitle>{isEditingVehicle ? "Update Vehicle Details" : "Register New Vehicle"}</CardTitle>
+              <CardDescription>
+                {isEditingVehicle
+                  ? "Correct the customer's details. A phone number is what earns them loyalty points and a receipt."
+                  : "This license plate is not in our system. Please add the vehicle details."}
+              </CardDescription>
             </CardHeader>
             <CardContent>
               <Form {...newVehicleForm}>
@@ -381,8 +487,8 @@ export function Workflow() {
                       <Card>
                           <CardContent className="p-2">
                               <div className="aspect-video w-full bg-muted rounded-md flex items-center justify-center overflow-hidden">
-                                  {vehiclePhotoUri ? (
-                                      <img src={vehiclePhotoUri} alt="Vehicle" className="h-full w-full object-cover rounded-md" />
+                                  {(vehiclePhotoUri || (isEditingVehicle && currentVehicle?.photoDataUri)) ? (
+                                      <img src={vehiclePhotoUri || currentVehicle?.photoDataUri} alt="Vehicle" className="h-full w-full object-cover rounded-md" />
                                   ) : (
                                       <ImageIcon className="size-12 text-muted-foreground" />
                                   )}
@@ -403,10 +509,18 @@ export function Workflow() {
                   <FormField control={newVehicleForm.control} name="licensePlate" render={({ field }) => (
                     <FormItem><FormLabel>License Plate</FormLabel><FormControl><Input {...field} disabled /></FormControl><FormMessage /></FormItem>
                   )}/>
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <FormField control={newVehicleForm.control} name="make" render={({ field }) => (
+                      <FormItem><FormLabel>Make (Optional)</FormLabel><FormControl><Input placeholder="Toyota" {...field} disabled={isSubmitting || isNewVehicleSaved} /></FormControl><FormMessage /></FormItem>
+                    )}/>
+                    <FormField control={newVehicleForm.control} name="model" render={({ field }) => (
+                      <FormItem><FormLabel>Model (Optional)</FormLabel><FormControl><Input placeholder="Hilux" {...field} disabled={isSubmitting || isNewVehicleSaved} /></FormControl><FormMessage /></FormItem>
+                    )}/>
+                  </div>
                   <FormField control={newVehicleForm.control} name="type" render={({ field }) => (
                     <FormItem>
                       <FormLabel>Vehicle Type</FormLabel>
-                      <Select onValueChange={field.onChange} defaultValue={field.value} disabled={isSubmitting || isNewVehicleSaved}>
+                      <Select onValueChange={field.onChange} defaultValue={field.value} disabled={isSubmitting || isNewVehicleSaved || isEditingVehicle}>
                         <FormControl><SelectTrigger><SelectValue placeholder="Select vehicle type" /></SelectTrigger></FormControl>
                         <SelectContent>
                           <SelectItem value="Sedan">Sedan</SelectItem>
@@ -422,16 +536,27 @@ export function Workflow() {
                     <FormItem><FormLabel>Owner Name (Optional)</FormLabel><FormControl><Input placeholder="John Doe" {...field} disabled={isSubmitting || isNewVehicleSaved}/></FormControl><FormMessage /></FormItem>
                   )}/>
                    <FormField control={newVehicleForm.control} name="phoneNumber" render={({ field }) => (
-                    <FormItem><FormLabel>Phone Number (for WhatsApp)</FormLabel><FormControl><Input placeholder="260977123456" {...field} disabled={isSubmitting || isNewVehicleSaved} /></FormControl><FormMessage /></FormItem>
+                    <FormItem><FormLabel>Phone Number (for WhatsApp &amp; loyalty points)</FormLabel><FormControl><Input inputMode="tel" placeholder="0977123456" {...field} disabled={isSubmitting || isNewVehicleSaved} /></FormControl><FormMessage /></FormItem>
+                  )}/>
+                  <FormField control={newVehicleForm.control} name="whatsappReceiptConsent" render={({ field }) => (
+                    <FormItem className="flex flex-row items-start gap-3 space-y-0 rounded-md border p-3">
+                      <FormControl>
+                        <Checkbox checked={field.value} onCheckedChange={(checked) => field.onChange(checked === true)} disabled={isSubmitting || isNewVehicleSaved} />
+                      </FormControl>
+                      <div className="space-y-1 leading-none">
+                        <FormLabel className="font-normal">Customer agrees to receive receipts on WhatsApp</FormLabel>
+                        <p className="text-xs text-muted-foreground">Ask before ticking. Receipts are only sent automatically with this on.</p>
+                      </div>
+                    </FormItem>
                   )}/>
                   <div className="flex gap-2">
-                    <Button type="button" variant="outline" onClick={() => setStep("vehicle")} disabled={isSubmitting || isNewVehicleSaved}>
+                    <Button type="button" variant="outline" onClick={() => { if (isEditingVehicle) { setIsEditingVehicle(false); setVehiclePhotoUri(null); setStep("services"); } else { setStep("vehicle"); } }} disabled={isSubmitting || isNewVehicleSaved}>
                       <ChevronLeft className="mr-2" />Back
                     </Button>
                     {!isNewVehicleSaved ? (
                         <Button type="submit" disabled={isSubmitting}>
                             {isSubmitting && <Loader2 className="mr-2 animate-spin" />}
-                            Register Vehicle
+                            {isEditingVehicle ? "Save Details" : "Register Vehicle"}
                         </Button>
                     ) : (
                         <Button type="button" onClick={() => setStep("services")}>
@@ -462,6 +587,29 @@ export function Workflow() {
                             </CardDescription>
                         </CardHeader>
                         <CardContent>
+                        <div className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-md border p-3">
+                            <div className="min-w-0 text-sm">
+                                <p className="font-medium">
+                                    {[currentVehicle?.make, currentVehicle?.model].filter(Boolean).join(" ") || currentVehicle?.type || "Vehicle"}
+                                    {currentVehicle?.ownerName ? ` · ${currentVehicle.ownerName}` : ""}
+                                </p>
+                                {customer ? (
+                                    <Badge variant="outline" className={`mt-1 gap-1 ${tierClasses[calcTier(customer.totalPoints ?? 0)]}`}>
+                                        <Trophy className="h-3 w-3" />
+                                        {calcTier(customer.totalPoints ?? 0)} · {customer.totalPoints ?? 0} pts · {customer.totalVisits ?? 0} visits
+                                    </Badge>
+                                ) : (
+                                    <p className="mt-1 text-xs text-muted-foreground">
+                                        {currentVehicle?.phoneNumber
+                                            ? "First visit on record — this wash starts their loyalty points."
+                                            : "No phone number saved, so no loyalty points or WhatsApp receipt."}
+                                    </p>
+                                )}
+                            </div>
+                            <Button type="button" variant="ghost" size="sm" onClick={editVehicleDetails}>
+                                <Pencil className="mr-1.5 h-3.5 w-3.5" /> Edit details
+                            </Button>
+                        </div>
                         <Form {...servicesForm}>
                             <form onSubmit={servicesForm.handleSubmit(handleCheckIn)}>
                                 <FormField control={servicesForm.control} name="selectedServices" render={() => (
@@ -494,6 +642,42 @@ export function Workflow() {
                                     ))}
                                     <FormMessage className="col-span-full" />
                                 </FormItem>
+                                )}/>
+                                <FormField control={servicesForm.control} name="bayNumber" render={({ field }) => (
+                                    <FormItem className="mt-4 max-w-[200px]">
+                                        <FormLabel>Bay (Optional)</FormLabel>
+                                        <FormControl><Input placeholder="e.g., 2" {...field} /></FormControl>
+                                        <FormMessage />
+                                    </FormItem>
+                                )}/>
+                                <FormField control={servicesForm.control} name="assignedWashers" render={({ field }) => (
+                                    <FormItem className="mt-4">
+                                        <FormLabel>Who is washing it? (Optional)</FormLabel>
+                                        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                                            {allWashers?.map((w) => {
+                                                const on = field.value.includes(w.id);
+                                                return (
+                                                    <button
+                                                        type="button"
+                                                        key={w.id}
+                                                        aria-pressed={on}
+                                                        onClick={() => field.onChange(on ? field.value.filter((id) => id !== w.id) : [...field.value, w.id])}
+                                                        className={`flex items-center gap-2 rounded-md border p-2.5 text-left text-sm transition-colors hover:border-primary ${on ? "border-primary border-2" : ""}`}
+                                                    >
+                                                        <span aria-hidden="true" className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-sm border border-primary ${on ? "bg-primary text-primary-foreground" : ""}`}>
+                                                            {on && <Check className="h-3 w-3" />}
+                                                        </span>
+                                                        <span className="truncate">{w.name}</span>
+                                                    </button>
+                                                );
+                                            })}
+                                        </div>
+                                        <p className="text-xs text-muted-foreground">
+                                            {allWashers?.length === 0
+                                                ? "No washers set up — ask an admin to add them."
+                                                : "You can set or change this later from Cars On Site, before payment."}
+                                        </p>
+                                    </FormItem>
                                 )}/>
                             </form>
                         </Form>

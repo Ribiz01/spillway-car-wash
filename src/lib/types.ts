@@ -2,11 +2,26 @@ import { User as FirebaseUser } from "firebase/auth";
 
 export type UserRole = 'Admin' | 'Attendant';
 
+/** A branch. Washes, expenses and staff can each be tied to one. */
+export interface Location {
+  id: string;
+  name: string;
+  address?: string;
+  active: boolean;
+  createdAt?: string;
+}
+
 export interface UserProfile {
   uid: string;
   name: string;
   email: string;
   role: UserRole;
+  /**
+   * Assigned branch. An attendant with one only sees that branch's cars; anyone
+   * with none (typically admins) sees every location.
+   */
+  locationId?: string | null;
+  locationName?: string | null;
 }
 
 export interface AppUser extends FirebaseUser {
@@ -16,9 +31,13 @@ export interface AppUser extends FirebaseUser {
 export interface Vehicle {
   id?: string;
   licensePlate: string;
+  make?: string;
+  model?: string;
   type: 'Sedan' | 'SUV' | 'Truck' | 'Minibus';
   ownerName?: string;
   phoneNumber?: string;
+  /** The customer agreed to be sent receipts on WhatsApp at this number. */
+  whatsappReceiptConsent?: boolean;
   photoDataUri?: string;
 }
 
@@ -28,7 +47,15 @@ export interface Service {
   price: number;
 }
 
-export type PaymentMethod = 'Cash' | 'Mobile Money' | 'Corporate Account';
+export type PaymentMethod =
+  | 'Cash'
+  | 'Mobile Money'
+  | 'Airtel Money'
+  | 'Bank Transfer'
+  | 'Other'
+  | 'Corporate Account';
+
+export type ReceiptDeliveryStatus = 'Pending' | 'Sent' | 'Failed';
 /**
  * 'In Progress'    — car checked in, being washed, no money taken yet.
  * 'Pending Payment'— finished and billed to a corporate account, not yet settled.
@@ -95,7 +122,32 @@ export interface Transaction {
   assignedWashers?: { id: string; name: string }[];
   status: TransactionStatus;
 
+  // --- Branch ---
+  /** Branch the car was checked in at. Absent on washes from before locations existed. */
+  locationId?: string;
+  locationName?: string;
+
+  // --- Vehicle & customer, denormalised at check-in so reports need no join ---
+  vehicleMake?: string;
+  vehicleModel?: string;
+  bayNumber?: string;
+  customerName?: string;
+  customerPhone?: string;
+  whatsappReceiptConsent?: boolean;
+
+  // --- Loyalty ---
+  /** `customers` document the points below were credited to. */
+  customerId?: string;
+  /** Points credited at completion — kept so a void can take exactly these back. */
+  loyaltyPointsEarned?: number;
+
+  // --- Receipt delivery ---
+  receiptDeliveryStatus?: ReceiptDeliveryStatus;
+  receiptDeliveryError?: string;
+
   // --- Completion ---
+  /** Check-in to payment, in seconds. */
+  washDurationSeconds?: number;
   /** When the wash was finished and payment taken. */
   completedAt?: string;
   /**
@@ -176,4 +228,44 @@ export interface CashUp {
   closedAt: string;
   closedByUid: string;
   closedByName: string;
+}
+
+export type CustomerTier = 'Bronze' | 'Silver' | 'Gold' | 'Platinum';
+
+/**
+ * A loyalty member. The document id is the customer's normalised phone number
+ * (see lib/loyalty), which lets a completion credit points with a blind merge
+ * write — no lookup first — so it still works with the tablet offline.
+ *
+ * There is deliberately no stored tier: it is derived from `totalPoints` with
+ * `calcTier`, so it can never drift out of step with the points.
+ */
+export interface Customer {
+  id: string;
+  name: string;
+  phoneNumber: string;
+  totalPoints: number;
+  totalVisits: number;
+  /** Lifetime amount actually paid, in ZMW. Excludes anything left on account. */
+  totalSpend: number;
+  lastVisitAt?: string;
+  lastPlate?: string;
+}
+
+/** Where the money for an expense came from. Mirrors the non-corporate payment methods. */
+export type ExpensePaymentSource = Exclude<PaymentMethod, 'Corporate Account'>;
+
+export interface Expense {
+  id: string;
+  /** Local business date, YYYY-MM-DD. */
+  date: string;
+  description: string;
+  /** ZMW. */
+  amount: number;
+  paymentSource: ExpensePaymentSource;
+  userId: string;
+  userName?: string;
+  locationId?: string;
+  locationName?: string;
+  createdAt: string;
 }

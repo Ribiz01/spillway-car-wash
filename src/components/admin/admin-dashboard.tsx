@@ -7,7 +7,9 @@ import { DollarSign, Car, TriangleAlert } from 'lucide-react';
 import { Alert, AlertDescription, AlertTitle } from '../ui/alert';
 import { useCollection } from '@/firebase/firestore/use-collection';
 import { formatCurrency, todayIso, startOfLocalDayIso, endOfLocalDayIso } from '@/lib/utils';
-import { amountByMethod, describeMethods, usedMethod } from '@/lib/payments';
+import { amountByMethod, describeMethods, electronicAmount, usedMethod } from '@/lib/payments';
+import { ALL_LOCATIONS, matchesLocationFilter } from '@/lib/locations';
+import { LocationFilter } from '@/components/location-filter';
 import { isActive, isRevenue, isReversed } from '@/lib/transactions';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../ui/table';
@@ -32,6 +34,7 @@ import { Input } from '../ui/input';
 export function AdminDashboard() {
   const [startDate, setStartDate] = useState<string>(todayIso);
   const [endDate, setEndDate] = useState<string>(todayIso);
+  const [locationFilter, setLocationFilter] = useState(ALL_LOCATIONS);
   const firestore = useFirestore();
   const { user, isLoading: isUserLoading } = useUser();
   
@@ -56,7 +59,12 @@ export function AdminDashboard() {
   const { data, isLoading: areTransactionsLoading, error: loadError } = useCollection<Transaction>(transactionsQuery);
   const isLoading = isUserLoading || areTransactionsLoading;
 
-  const filteredTransactions = data || [];
+  // Branch is filtered here rather than in the query: combining it with the
+  // timestamp range would need a composite index deployed.
+  const filteredTransactions = useMemo(
+    () => (data || []).filter((t) => matchesLocationFilter(t, locationFilter)),
+    [data, locationFilter]
+  );
 
   // Every real sale, paid or billed on account. Using status === 'Completed'
   // here would drop the cash portion of a split wash that also went partly on
@@ -73,7 +81,8 @@ export function AdminDashboard() {
   // Sums the cash/MoMo PORTION of each wash: with split payments one wash can
   // contribute to both, so filtering by a single method would lose money.
   const cashTotal = completedTransactions.reduce((acc, t) => acc + amountByMethod(t, 'Cash'), 0);
-  const mobileMoneyTotal = completedTransactions.reduce((acc, t) => acc + amountByMethod(t, 'Mobile Money'), 0);
+  // Every electronic method — Mobile Money, Airtel Money, transfers, Other.
+  const mobileMoneyTotal = completedTransactions.reduce((acc, t) => acc + electronicAmount(t), 0);
 
   const servicePerformance = useMemo(() => {
     const serviceCount: { [key: string]: number } = {};
@@ -147,9 +156,10 @@ export function AdminDashboard() {
 
   return (
     <div className="space-y-6">
-      <div className="flex justify-between items-center">
+      <div className="flex flex-wrap justify-between items-center gap-3">
         <h1 className="text-2xl font-bold tracking-tight">Admin Dashboard</h1>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <LocationFilter value={locationFilter} onChange={setLocationFilter} />
           <Input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="w-[150px]" />
           <span className="text-muted-foreground text-sm">to</span>
           <Input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} className="w-[150px]" />
@@ -192,7 +202,7 @@ export function AdminDashboard() {
         </Card>
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Mobile Money</CardTitle>
+            <CardTitle className="text-sm font-medium">Mobile Money &amp; Transfers</CardTitle>
             <DollarSign className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>

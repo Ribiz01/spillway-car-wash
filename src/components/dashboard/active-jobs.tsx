@@ -1,7 +1,7 @@
 'use client';
 
 import { useMemo, useState } from 'react';
-import { collection, doc, query, where, updateDoc } from 'firebase/firestore';
+import { collection, doc, increment, query, setDoc, where, updateDoc } from 'firebase/firestore';
 import { useFirestore, useMemoFirebase } from '@/firebase';
 import { useCollection } from '@/firebase/firestore/use-collection';
 import { useDoc } from '@/firebase/firestore/use-doc';
@@ -9,7 +9,16 @@ import { useUser } from '@/firebase/auth/use-user';
 import { useSyncStatus } from '@/firebase/sync-status';
 import type { CorporateAccount, PaymentMethod, Service, Transaction, Vehicle, Washer } from '@/lib/types';
 import { cn, formatCurrency } from '@/lib/utils';
-import { methodsUsed, moneyEquals, roundMoney, transactionPayments } from '@/lib/payments';
+import {
+  PAYMENT_METHODS,
+  methodsUsed,
+  moneyEquals,
+  requiresReference,
+  roundMoney,
+  transactionPayments,
+} from '@/lib/payments';
+import { calcPointsEarned, customerIdForPhone, normalisePhone } from '@/lib/loyalty';
+import { inUserLocation } from '@/lib/locations';
 import type { Payment } from '@/lib/types';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -30,7 +39,12 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { useToast } from '@/hooks/use-toast';
-import { Car, Check, Clock, Loader2, TriangleAlert, CloudOff, Plus, X, Share2, Ban } from 'lucide-react';
+import { Car, Check, Clock, Loader2, TriangleAlert, CloudOff, Plus, X, Share2, Ban, Send, Trophy, Users } from 'lucide-react';
+
+/** Where automatic WhatsApp delivery of the current receipt has got to. */
+type Delivery =
+  | { state: 'idle' | 'sending' | 'sent' | 'unavailable' }
+  | { state: 'failed'; error: string };
 
 /**
  * One line of a possibly-split payment. Amount is held as a string because it is
@@ -118,6 +132,10 @@ export function ActiveJobs() {
   /** The job being cancelled, and why. */
   const [cancelling, setCancelling] = useState<Transaction | null>(null);
   const [cancelReason, setCancelReason] = useState('');
+  const [delivery, setDelivery] = useState<Delivery>({ state: 'idle' });
+  /** The job whose washers are being set before payment, and the selection so far. */
+  const [assigning, setAssigning] = useState<Transaction | null>(null);
+  const [assignIds, setAssignIds] = useState<string[]>([]);
 
   // Equality on `status` alone — no orderBy — so this is served by the automatic
   // single-field index and needs nothing deployed. Sorted client-side below.
@@ -149,23 +167,37 @@ export function ActiveJobs() {
   );
   const { data: accounts } = useCollection<CorporateAccount>(accountsQuery);
 
-  // The receipt needs the customer's phone number, which lives on the vehicle,
-  // not the transaction. The vehicle document id IS the plate (see check-in).
-  const receiptVehicleRef = useMemoFirebase(
-    () => (firestore && receipt ? doc(firestore, 'vehicles', receipt.licensePlate) : null),
-    [firestore, receipt]
+  // New check-ins carry the customer's details on the job itself. Cars checked
+  // in before that existed do not, so the vehicle record is read as a fallback
+  // for whichever car is in focus. The vehicle document id IS the plate.
+  const focusPlate = job?.licensePlate ?? receipt?.licensePlate;
+  const focusVehicleRef = useMemoFirebase(
+    () => (firestore && focusPlate ? doc(firestore, 'vehicles', focusPlate) : null),
+    [firestore, focusPlate]
   );
-  const { data: receiptVehicle } = useDoc<Vehicle>(receiptVehicleRef);
+  const { data: focusVehicle } = useDoc<Vehicle>(focusVehicleRef);
 
-  // Oldest first: the car that has been waiting longest should be dealt with first.
+  const receiptPhone = normalisePhone(receipt?.customerPhone ?? focusVehicle?.phoneNumber);
+
+  // Oldest first: the car that has been waiting longest should be dealt with
+  // first. An attendant assigned to a branch only sees that branch's cars.
   const waiting = useMemo(
-    () => [...(jobs ?? [])].sort((a, b) => a.timestamp.localeCompare(b.timestamp)),
-    [jobs]
+    () =>
+      (jobs ?? [])
+        .filter((j) => inUserLocation(j, user?.profile))
+        .sort((a, b) => a.timestamp.localeCompare(b.timestamp)),
+    [jobs, user?.profile]
   );
 
   const openJob = (j: Transaction) => {
     setJob(j);
-    setWasherIds([]);
+    // Start from whoever was assigned before payment. Ids of washers that have
+    // since been removed are dropped, so the "at least one" check stays honest.
+    setWasherIds(
+      (j.assignedWashers ?? [])
+        .map((w) => w.id)
+        .filter((id) => !allWashers || allWashers.some((w) => w.id === id))
+    );
     setServiceIds(j.services.map((s) => s.id));
     // Seed one Cash line for the whole amount: the overwhelmingly common case is
     // a single cash payment, and splitting is opt-in from there.
@@ -191,7 +223,7 @@ export function ActiveJobs() {
     lines.every(
       (l) =>
         parseAmount(l.amount) > 0 &&
-        (l.method !== 'Mobile Money' || l.reference.trim().length > 0) &&
+        (!requiresReference(l.method) || l.reference.trim().length > 0) &&
         (l.method !== 'Corporate Account' || !!l.accountId)
     );
 
@@ -238,6 +270,18 @@ export function ActiveJobs() {
     // the customer handed over cash for the rest.
     const corporateLine = payments.find((p) => p.method === 'Corporate Account');
 
+    // Loyalty is earned on money actually handed over; the on-account portion
+    // earns nothing. The customer is keyed by phone number, so no lookup is
+    // needed and this still works with the tablet offline.
+    const customerPhone = job.customerPhone ?? focusVehicle?.phoneNumber ?? '';
+    const customerName = job.customerName ?? focusVehicle?.ownerName ?? '';
+    const consent = job.whatsappReceiptConsent ?? focusVehicle?.whatsappReceiptConsent === true;
+    const customerId = customerIdForPhone(customerPhone);
+    const paid = roundMoney(
+      payments.filter((p) => p.method !== 'Corporate Account').reduce((acc, p) => acc + p.amount, 0)
+    );
+    const pointsEarned = customerId ? calcPointsEarned(paid) : 0;
+
     const update = {
       services: chosenServices.map((s) => ({ id: s.id, name: s.name, price: s.price })),
       totalAmount: amountDue,
@@ -248,6 +292,15 @@ export function ActiveJobs() {
       completedAt,
       completedByUid: user.uid,
       completedByName: user.profile?.name || user.email || 'Unknown',
+      washDurationSeconds: Math.max(
+        0,
+        Math.floor((Date.parse(completedAt) - Date.parse(job.timestamp)) / 1000)
+      ),
+      whatsappReceiptConsent: consent,
+      ...(customerPhone ? { customerPhone } : {}),
+      ...(customerName ? { customerName } : {}),
+      // Recorded on the wash so that voiding it can take back exactly these points.
+      ...(customerId ? { customerId, loyaltyPointsEarned: pointsEarned } : {}),
       // Kept at the top level too so the corporate screens can group and label
       // without walking every payment line.
       ...(corporateLine
@@ -266,10 +319,38 @@ export function ActiveJobs() {
         title: `${job.licensePlate} completed`,
         description: `${formatCurrency(amountDue)} settled by ${methodsUsed(payments).join(' + ')}.`,
       });
+      if (customerId) {
+        // A blind merge with increments: creates the member on a first visit and
+        // adds to them on every later one, without reading first. Not awaited —
+        // a loyalty hiccup must never hold up the till.
+        setDoc(
+          doc(firestore, 'customers', customerId),
+          {
+            phoneNumber: customerId,
+            ...(customerName ? { name: customerName } : {}),
+            totalPoints: increment(pointsEarned),
+            totalVisits: increment(1),
+            totalSpend: increment(paid),
+            lastVisitAt: completedAt,
+            lastPlate: job.licensePlate,
+          },
+          { merge: true }
+        ).catch(() => {
+          toast({
+            title: 'Loyalty points not saved',
+            description: 'The payment was recorded. Tell an admin so the points can be added.',
+            variant: 'destructive',
+          });
+        });
+      }
+
       // Hand straight to the receipt: the customer is still standing there, and
       // this is the only moment they can be given one.
-      setReceipt({ ...job, ...update } as Transaction);
+      const completed = { ...job, ...update } as Transaction;
+      setReceipt(completed);
       setJob(null);
+      setDelivery({ state: 'idle' });
+      if (consent && customerId && !isWorkingOffline) void sendReceipt(completed);
     } catch (e: any) {
       toast({
         title: 'Could not complete this wash',
@@ -279,6 +360,74 @@ export function ActiveJobs() {
     } finally {
       setIsSubmitting(false);
     }
+  };
+
+  /** Saves who is washing a car that is still on site. No money is involved. */
+  const saveWashers = async () => {
+    if (!firestore || !assigning) return;
+    setIsSubmitting(true);
+    const assignedWashers = (allWashers ?? [])
+      .filter((w) => assignIds.includes(w.id))
+      .map((w) => ({ id: w.id, name: w.name }));
+    try {
+      await updateDoc(doc(firestore, 'transactions', assigning.id), { assignedWashers });
+      toast({
+        title: `${assigning.licensePlate} assigned`,
+        description: assignedWashers.length
+          ? assignedWashers.map((w) => w.name).join(', ')
+          : 'No washers assigned.',
+      });
+      setAssigning(null);
+    } catch (e: any) {
+      toast({
+        title: 'Could not assign washers',
+        description: e?.message || 'Nothing was changed. Try again.',
+        variant: 'destructive',
+      });
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  /**
+   * Asks the server to deliver the receipt over the WhatsApp Cloud API. The
+   * server re-reads the wash and checks consent itself; this only reports back.
+   */
+  const sendReceipt = async (t: Transaction) => {
+    if (!firestore || !user) return;
+    setDelivery({ state: 'sending' });
+    let outcome: Delivery;
+    try {
+      const response = await fetch('/api/send-receipt', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${await user.getIdToken()}`,
+        },
+        body: JSON.stringify({ transactionId: t.id }),
+      });
+      if (response.status === 503) {
+        // Automatic delivery simply is not set up on this deployment. That is a
+        // configuration state, not a failed receipt, so nothing is recorded and
+        // the attendant is pointed at the manual button instead.
+        setDelivery({ state: 'unavailable' });
+        return;
+      }
+      const result = await response.json().catch(() => ({}));
+      outcome = response.ok
+        ? { state: 'sent' }
+        : { state: 'failed', error: result.error || 'Receipt delivery failed.' };
+    } catch {
+      outcome = { state: 'failed', error: 'No connection to the server. Try again when back online.' };
+    }
+    setDelivery(outcome);
+    updateDoc(doc(firestore, 'transactions', t.id), {
+      receiptDeliveryStatus: outcome.state === 'sent' ? 'Sent' : 'Failed',
+      receiptDeliveryError: outcome.state === 'failed' ? outcome.error : '',
+    }).catch(() => {
+      // The receipt itself went (or did not); failing to log that is not worth
+      // interrupting the attendant for.
+    });
   };
 
   const confirmCancel = async () => {
@@ -313,7 +462,7 @@ export function ActiveJobs() {
 
   const shareReceipt = () => {
     if (!receipt) return;
-    const phone = receiptVehicle?.phoneNumber?.replace(/[^0-9]/g, '');
+    const phone = receiptPhone;
     if (!phone) return;
 
     const services = receipt.services.map(
@@ -335,6 +484,9 @@ export function ActiveJobs() {
       `Receipt ID: ${receipt.id}`,
       `Date: ${new Date(receipt.completedAt ?? receipt.timestamp).toLocaleString()}`,
       `License Plate: ${receipt.licensePlate}`,
+      ...([receipt.vehicleMake, receipt.vehicleModel].some(Boolean)
+        ? [`Vehicle: ${[receipt.vehicleMake, receipt.vehicleModel].filter(Boolean).join(' ')}`]
+        : []),
       '',
       '*Services:*',
       ...services,
@@ -346,6 +498,7 @@ export function ActiveJobs() {
       `*TOTAL: ${formatCurrency(receipt.totalAmount)}*`,
       `Status: ${receipt.status}`,
       '---------------------------',
+      ...(receipt.loyaltyPointsEarned ? ['', `You earned ${receipt.loyaltyPointsEarned} loyalty points today.`] : []),
       '',
       'Thank you for your business!',
     ];
@@ -411,14 +564,37 @@ export function ActiveJobs() {
                       </Badge>
                     </div>
                     <p className="mt-1 truncate text-xs text-muted-foreground">
+                      {[j.vehicleMake, j.vehicleModel].filter(Boolean).join(' ')}
+                      {j.vehicleMake || j.vehicleModel ? ' · ' : ''}
                       {j.services.map((s) => s.name).join(', ')}
+                      {j.bayNumber ? ` · bay ${j.bayNumber}` : ''}
                       {j.userName ? ` · in by ${j.userName}` : ''}
+                    </p>
+                    <p className="mt-0.5 truncate text-xs">
+                      {j.assignedWashers?.length ? (
+                        <span className="text-muted-foreground">
+                          Washing: {j.assignedWashers.map((w) => w.name).join(', ')}
+                        </span>
+                      ) : (
+                        <span className="text-amber-700">No washer assigned yet</span>
+                      )}
                     </p>
                   </div>
                   <div className="flex items-center gap-3">
                     <span className="font-medium tabular-nums">
                       {formatCurrency(j.totalAmount)}
                     </span>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => {
+                        setAssigning(j);
+                        setAssignIds((j.assignedWashers ?? []).map((w) => w.id));
+                      }}
+                    >
+                      <Users className="mr-1.5 h-4 w-4" />
+                      {j.assignedWashers?.length ? 'Washers' : 'Assign'}
+                    </Button>
                     <Button size="sm" onClick={() => openJob(j)}>
                       <Check className="mr-1.5 h-4 w-4" /> Complete
                     </Button>
@@ -448,7 +624,7 @@ export function ActiveJobs() {
           <DialogHeader>
             <DialogTitle>Complete {job?.licensePlate}</DialogTitle>
             <DialogDescription>
-              Assign who washed it, confirm the work, then take payment.
+              Confirm who washed it and the work done, then take payment.
             </DialogDescription>
           </DialogHeader>
 
@@ -555,9 +731,9 @@ export function ActiveJobs() {
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
-                          <SelectItem value="Cash">Cash</SelectItem>
-                          <SelectItem value="Mobile Money">Mobile Money</SelectItem>
-                          <SelectItem value="Corporate Account">Corporate Account</SelectItem>
+                          {PAYMENT_METHODS.map((method) => (
+                            <SelectItem key={method} value={method}>{method}</SelectItem>
+                          ))}
                         </SelectContent>
                       </Select>
                       <Input
@@ -581,14 +757,18 @@ export function ActiveJobs() {
                       )}
                     </div>
 
-                    {line.method === 'Mobile Money' && (
+                    {(requiresReference(line.method) || line.method === 'Other') && (
                       <div className="space-y-1">
                         <Input
-                          placeholder="Mobile Money reference, e.g. MM-12345"
+                          placeholder={
+                            line.method === 'Other'
+                              ? 'What was it? e.g. voucher, card (optional)'
+                              : `${line.method} reference, e.g. ${line.method === 'Bank Transfer' ? 'FT-12345' : 'MM-12345'}`
+                          }
                           value={line.reference}
                           onChange={(e) => updateLine(line.key, { reference: e.target.value })}
                         />
-                        {line.reference.trim().length === 0 && (
+                        {requiresReference(line.method) && line.reference.trim().length === 0 && (
                           <p className="text-xs text-destructive">
                             Required — cash-up reconciles against it.
                           </p>
@@ -665,6 +845,54 @@ export function ActiveJobs() {
             <Button onClick={completeJob} disabled={!canSubmit || isSubmitting}>
               {isSubmitting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
               Take {formatCurrency(amountDue)}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Assign washers to a car before it is paid for. */}
+      <Dialog open={!!assigning} onOpenChange={(open) => !open && setAssigning(null)}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Who is washing {assigning?.licensePlate}?</DialogTitle>
+            <DialogDescription>
+              Pick everyone working on this car. You can change it again any time before
+              payment; points are split equally between them.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid grid-cols-2 gap-2 py-2">
+            {allWashers?.map((w) => {
+              const on = assignIds.includes(w.id);
+              return (
+                <button
+                  type="button"
+                  key={w.id}
+                  aria-pressed={on}
+                  onClick={() =>
+                    setAssignIds((prev) => (on ? prev.filter((id) => id !== w.id) : [...prev, w.id]))
+                  }
+                  className={`flex items-center gap-2 rounded-md border p-2.5 text-left text-sm transition-colors hover:border-primary ${
+                    on ? 'border-primary border-2' : ''
+                  }`}
+                >
+                  <TickBox on={on} />
+                  <span className="truncate">{w.name}</span>
+                </button>
+              );
+            })}
+          </div>
+          {allWashers?.length === 0 && (
+            <p className="text-sm text-muted-foreground">
+              No washers set up — ask an admin to add them.
+            </p>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setAssigning(null)} disabled={isSubmitting}>
+              Cancel
+            </Button>
+            <Button onClick={saveWashers} disabled={isSubmitting}>
+              {isSubmitting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              Save
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -766,19 +994,49 @@ export function ActiveJobs() {
                   Part of this wash is on account and is still owed.
                 </p>
               )}
+
+              {!!receipt.loyaltyPointsEarned && (
+                <div className="flex items-center gap-2 rounded-md border border-amber-400/40 bg-amber-400/5 p-3 text-amber-700">
+                  <Trophy className="h-4 w-4 shrink-0" />
+                  <span>
+                    {receipt.customerName ? `${receipt.customerName} earned ` : 'Earned '}
+                    <span className="font-semibold">{receipt.loyaltyPointsEarned} loyalty points</span>.
+                  </span>
+                </div>
+              )}
+
+              {delivery.state === 'sending' && (
+                <p className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" /> Sending the receipt on WhatsApp…
+                </p>
+              )}
+              {delivery.state === 'sent' && (
+                <p className="flex items-center gap-2 text-xs text-emerald-700">
+                  <Check className="h-3.5 w-3.5" /> Receipt delivered on WhatsApp.
+                </p>
+              )}
+              {delivery.state === 'failed' && (
+                <p className="text-xs text-destructive">Receipt not delivered: {delivery.error}</p>
+              )}
             </div>
           )}
 
           <DialogFooter className="flex-col gap-2 sm:flex-col">
+            {delivery.state === 'failed' && receipt && (
+              <Button className="w-full" variant="outline" onClick={() => void sendReceipt(receipt)}>
+                <Send className="mr-2 h-4 w-4" /> Try sending again
+              </Button>
+            )}
             <Button
               className="w-full"
               variant="outline"
               onClick={shareReceipt}
-              disabled={!receiptVehicle?.phoneNumber}
+              disabled={!receiptPhone}
             >
-              <Share2 className="mr-2 h-4 w-4" /> Send on WhatsApp
+              <Share2 className="mr-2 h-4 w-4" />
+              {delivery.state === 'sent' ? 'Open in WhatsApp as well' : 'Send on WhatsApp'}
             </Button>
-            {!receiptVehicle?.phoneNumber && (
+            {!receiptPhone && (
               <p className="text-center text-xs text-muted-foreground">
                 No phone number saved for this vehicle, so it can&apos;t be sent.
               </p>

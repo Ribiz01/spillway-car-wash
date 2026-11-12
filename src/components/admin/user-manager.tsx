@@ -12,6 +12,7 @@ import { useFirestore, useMemoFirebase } from '@/firebase';
 import { useCollection } from '@/firebase/firestore/use-collection';
 import { useUser } from "@/firebase/auth/use-user";
 import type { UserProfile } from "@/lib/types";
+import { useLocations } from "@/components/location-filter";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -39,6 +40,7 @@ const userSchema = z.object({
   name: z.string().min(2, "Name is required."),
   email: z.string().email("Invalid email address."),
   role: z.enum(["Admin", "Attendant"]),
+  locationId: z.string().optional(),
   password: z.string().optional(),
   confirmPassword: z.string().optional(),
 }).refine((data) => {
@@ -66,6 +68,7 @@ export function UserManager() {
   }, [firestore]);
   const { data: users, isLoading } = useCollection<UserProfile>(usersQuery);
   const { user: currentUser } = useUser();
+  const { locations } = useLocations();
 
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -80,6 +83,7 @@ export function UserManager() {
       name: "",
       email: "",
       role: "Attendant",
+      locationId: "",
       password: "",
       confirmPassword: "",
     },
@@ -93,11 +97,12 @@ export function UserManager() {
         name: user.name || "",
         email: user.email || "",
         role: user.role || "Attendant",
+        locationId: user.locationId ?? "",
         password: "",
         confirmPassword: "",
       });
     } else {
-      form.reset({ uid: undefined, name: "", email: "", role: "Attendant", password: "", confirmPassword: "" });
+      form.reset({ uid: undefined, name: "", email: "", role: "Attendant", locationId: "", password: "", confirmPassword: "" });
     }
     setIsDialogOpen(true);
   };
@@ -106,6 +111,13 @@ export function UserManager() {
     if (!firestore) return;
     setIsSubmitting(true);
 
+    // The name is stored alongside the id so the header and every wash can show
+    // the branch without a second read. Explicit nulls clear a previous branch.
+    const location = locations.find((l) => l.id === data.locationId);
+    const locationPayload = location
+      ? { locationId: location.id, locationName: location.name }
+      : { locationId: null, locationName: null };
+
     // EDITING EXISTING USER
     if (editingUser) {
         try {
@@ -113,6 +125,7 @@ export function UserManager() {
             await setDoc(userRef, {
                 name: data.name,
                 role: data.role,
+                ...locationPayload,
             }, { merge: true });
             toast({ title: "User Updated", description: `${data.name} has been updated.` });
             setIsDialogOpen(false);
@@ -141,6 +154,7 @@ export function UserManager() {
                 name: data.name,
                 email: data.email,
                 role: data.role,
+                ...locationPayload,
             });
             
             toast({ title: "User Created", description: `${data.name} has been created successfully.` });
@@ -210,13 +224,14 @@ export function UserManager() {
                 <TableHead>Name</TableHead>
                 <TableHead>Email</TableHead>
                 <TableHead>Role</TableHead>
+                <TableHead>Location</TableHead>
                 <TableHead className="text-right">Actions</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {isLoading ? (
                 <TableRow key="loading">
-                  <TableCell colSpan={4} className="text-center">
+                  <TableCell colSpan={5} className="text-center">
                     <Loader2 className="mx-auto my-4 h-6 w-6 animate-spin" />
                   </TableCell>
                 </TableRow>
@@ -227,6 +242,9 @@ export function UserManager() {
                     <TableCell>{user.email}</TableCell>
                     <TableCell>
                       <Badge variant={user.role === 'Admin' ? 'destructive' : 'secondary'}>{user.role}</Badge>
+                    </TableCell>
+                    <TableCell className="text-muted-foreground">
+                      {user.locationName || <span className="italic">All</span>}
                     </TableCell>
                     <TableCell className="text-right">
                       <Button variant="ghost" size="icon" onClick={() => handleDialogOpen(user)}>
@@ -249,7 +267,7 @@ export function UserManager() {
                 ))
               ) : (
                 <TableRow key="empty">
-                  <TableCell colSpan={4} className="text-center text-muted-foreground">
+                  <TableCell colSpan={5} className="text-center text-muted-foreground">
                     No users found.
                   </TableCell>
                 </TableRow>
@@ -288,6 +306,31 @@ export function UserManager() {
                   <FormMessage />
                 </FormItem>
               )}/>
+              {locations.length > 0 && (
+                <FormField control={form.control} name="locationId" render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Assigned Location</FormLabel>
+                    <Select
+                      value={field.value || "__none__"}
+                      onValueChange={(v) => field.onChange(v === "__none__" ? "" : v)}
+                    >
+                      <FormControl><SelectTrigger><SelectValue /></SelectTrigger></FormControl>
+                      <SelectContent>
+                        <SelectItem value="__none__">All locations</SelectItem>
+                        {locations
+                          .filter((l) => l.active || l.id === field.value)
+                          .map((l) => (
+                            <SelectItem key={l.id} value={l.id}>{l.name}</SelectItem>
+                          ))}
+                      </SelectContent>
+                    </Select>
+                    <p className="text-xs text-muted-foreground">
+                      Takes effect the next time they sign in.
+                    </p>
+                    <FormMessage />
+                  </FormItem>
+                )}/>
+              )}
               {!editingUser && (
                 <>
                   <FormField control={form.control} name="password" render={({ field }) => (
