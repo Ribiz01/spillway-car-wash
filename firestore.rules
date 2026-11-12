@@ -116,7 +116,17 @@ service cloud.firestore {
     match /vehicles/{vehicleId} {
       allow get, list: if isSignedIn();
       allow create: if isSignedIn();
-      allow update, delete: if isAdmin() && isExistingDoc();
+      // Attendants may fill in or correct the customer-facing details of a known
+      // vehicle (a returning car with no phone number cannot be sent a receipt or
+      // earn loyalty points), but never its plate or type.
+      allow update: if isExistingDoc()
+                    && (isAdmin()
+                        || (isSignedIn()
+                            && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+                              'make', 'model', 'ownerName', 'phoneNumber',
+                              'whatsappReceiptConsent', 'photoDataUri'
+                            ])));
+      allow delete: if isAdmin() && isExistingDoc();
     }
 
     /**
@@ -135,6 +145,38 @@ service cloud.firestore {
     match /washers/{washerId} {
       allow get, list: if isSignedIn();
       allow create, update, delete: if isAdmin();
+    }
+
+    /**
+     * @description Branches. Every employee reads them (their own branch is shown
+     * in the header and stamped on washes); only admins manage them.
+     */
+    match /locations/{locationId} {
+      allow get, list: if isSignedIn();
+      allow create, update, delete: if isAdmin();
+    }
+
+    /**
+     * @description Loyalty members, keyed by normalised phone number. Points are
+     * credited from the till when a wash is paid for, so any signed-in employee
+     * may create or update one. Only admins may delete.
+     */
+    match /customers/{customerId} {
+      allow get, list: if isSignedIn();
+      allow create, update: if isSignedIn();
+      allow delete: if isAdmin();
+    }
+
+    /**
+     * @description Money paid out of the business. Admin-only, and the recorder
+     * is fixed at creation so an expense always has an owner.
+     */
+    match /expenses/{expenseId} {
+      allow get, list: if isAdmin();
+      allow create: if isAdmin() && request.resource.data.userId == request.auth.uid;
+      allow update: if isAdmin() && isExistingDoc()
+                    && request.resource.data.userId == resource.data.userId;
+      allow delete: if isAdmin() && isExistingDoc();
     }
 
     /**
@@ -158,7 +200,12 @@ service cloud.firestore {
                     && request.resource.data.userId == resource.data.userId
                     && (isAdmin()
                         || isOwner(resource.data.userId)
-                        || resource.data.status == 'In Progress');
+                        || resource.data.status == 'In Progress'
+                        // Whoever took the payment records whether the receipt
+                        // reached the customer. That happens just AFTER the job
+                        // locks, so it is allowed for these two fields only.
+                        || request.resource.data.diff(resource.data).affectedKeys()
+                             .hasOnly(['receiptDeliveryStatus', 'receiptDeliveryError']));
       allow delete: if isExistingDoc() && isCreatorOrAdmin(resource.data.userId);
     }
 

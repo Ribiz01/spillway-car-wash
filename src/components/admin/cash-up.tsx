@@ -1,14 +1,14 @@
 'use client';
 
 import { useMemo, useState } from 'react';
-import { collection, doc, query, where, orderBy, setDoc, updateDoc, type QueryConstraint } from 'firebase/firestore';
+import { collection, doc, increment, query, where, orderBy, setDoc, updateDoc, type QueryConstraint } from 'firebase/firestore';
 import { useFirestore, useMemoFirebase } from '@/firebase';
 import { useCollection } from '@/firebase/firestore/use-collection';
 import { useDoc } from '@/firebase/firestore/use-doc';
 import { useUser } from '@/firebase/auth/use-user';
 import type { CashUp as CashUpRecord, Transaction } from '@/lib/types';
 import { formatCurrency, todayIso, startOfLocalDayIso, endOfLocalDayIso } from '@/lib/utils';
-import { amountByMethod, describeMethods, transactionPayments, usedMethod } from '@/lib/payments';
+import { amountByMethod, describeMethods, electronicAmount, isElectronic, paidAmount, requiresReference, transactionPayments } from '@/lib/payments';
 import { isActive, isRevenue, isReversed, reversalSummary } from '@/lib/transactions';
 import { downloadCsv, toCsvSections } from '@/lib/csv';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -76,14 +76,18 @@ export function CashUp() {
     // these sum PORTIONS rather than counting whole transactions. Cash + MoMo +
     // corporate therefore still reconciles exactly to the day's total.
     const cashTotal = rows.reduce((acc, t) => acc + amountByMethod(t, 'Cash'), 0);
-    const momoTotal = rows.reduce((acc, t) => acc + amountByMethod(t, 'Mobile Money'), 0);
+    // "momo" throughout this screen now means every electronic method — Mobile
+    // Money, Airtel Money, bank transfers and Other. None of it is in the drawer
+    // and all of it is checked against a statement, so it is one bucket here;
+    // Banking & Expenses breaks it down per method.
+    const momoTotal = rows.reduce((acc, t) => acc + electronicAmount(t), 0);
     const corporateTotal = rows.reduce(
       (acc, t) => acc + amountByMethod(t, 'Corporate Account'),
       0
     );
 
-    // Washes with any mobile money portion — each MoMo line needs a reference.
-    const momoRows = rows.filter((t) => usedMethod(t, 'Mobile Money'));
+    // Washes with any electronic portion — these are ticked off a statement.
+    const momoRows = rows.filter((t) => electronicAmount(t) > 0);
 
     // Per-attendant breakdown — this is who you hold accountable for the float.
     // Keyed on whoever TOOK THE PAYMENT, not whoever checked the car in: a car
@@ -104,7 +108,7 @@ export function CashUp() {
       const entry = byAttendant.get(key)!;
       entry.count += 1;
       entry.cash += amountByMethod(t, 'Cash');
-      entry.momo += amountByMethod(t, 'Mobile Money');
+      entry.momo += electronicAmount(t);
       entry.corporate += amountByMethod(t, 'Corporate Account');
     }
 
@@ -155,6 +159,25 @@ export function CashUp() {
         voidedByName: user.profile?.name || user.email || 'Unknown',
         reversalReason: voidReason.trim(),
       });
+      if (voiding.customerId) {
+        // The sale no longer happened, so neither did the visit or the points.
+        // Exactly what completion credited is taken back.
+        setDoc(
+          doc(firestore, 'customers', voiding.customerId),
+          {
+            totalPoints: increment(-(voiding.loyaltyPointsEarned ?? 0)),
+            totalVisits: increment(-1),
+            totalSpend: increment(-paidAmount(voiding)),
+          },
+          { merge: true }
+        ).catch(() => {
+          toast({
+            title: 'Loyalty points not reversed',
+            description: `The wash was voided, but ${voiding.customerName ?? 'the customer'} kept the points for it.`,
+            variant: 'destructive',
+          });
+        });
+      }
       toast({
         title: `${voiding.licensePlate} voided`,
         description: 'Removed from today’s takings. Re-record the wash if it needs correcting.',
@@ -180,7 +203,7 @@ export function CashUp() {
           { Item: 'Expected Cash', Amount: summary.cashTotal.toFixed(2) },
           { Item: 'Counted Cash', Amount: hasCount ? counted.toFixed(2) : 'not counted' },
           { Item: 'Variance', Amount: hasCount ? variance.toFixed(2) : '—' },
-          { Item: 'Mobile Money', Amount: summary.momoTotal.toFixed(2) },
+          { Item: 'Mobile Money & Transfers', Amount: summary.momoTotal.toFixed(2) },
           { Item: 'Corporate (unpaid)', Amount: summary.corporateTotal.toFixed(2) },
           { Item: 'Total Banked', Amount: summary.bankable.toFixed(2) },
           { Item: 'Vehicles Washed', Amount: String(summary.count) },
@@ -192,21 +215,22 @@ export function CashUp() {
           Attendant: a.name,
           Washes: a.count,
           Cash: a.cash.toFixed(2),
-          'Mobile Money': a.momo.toFixed(2),
+          'Mobile Money & Transfers': a.momo.toFixed(2),
           Corporate: a.corporate.toFixed(2),
         })),
       },
       {
-        title: 'MOBILE MONEY REFERENCES',
+        title: 'MOBILE MONEY & TRANSFER REFERENCES',
         rows: summary.momoRows.map((t) => ({
           Time: new Date(t.timestamp).toLocaleTimeString('en-ZM', { hour: '2-digit', minute: '2-digit' }),
           Plate: t.licensePlate,
+          Method: [...new Set(transactionPayments(t).filter((p) => isElectronic(p.method)).map((p) => p.method))].join('; '),
           Reference:
             transactionPayments(t)
-              .filter((p) => p.method === 'Mobile Money')
-              .map((p) => p.reference || 'MISSING')
+              .filter((p) => isElectronic(p.method))
+              .map((p) => p.reference || (requiresReference(p.method) ? 'MISSING' : '—'))
               .join('; ') || 'MISSING',
-          Amount: amountByMethod(t, 'Mobile Money').toFixed(2),
+          Amount: electronicAmount(t).toFixed(2),
         })),
       },
       {
@@ -227,7 +251,7 @@ export function CashUp() {
           Washers: (t.assignedWashers ?? []).map((w) => w.name).join('; '),
           Method: describeMethods(t),
           Cash: amountByMethod(t, 'Cash').toFixed(2),
-          'Mobile Money': amountByMethod(t, 'Mobile Money').toFixed(2),
+          'Mobile Money & Transfers': electronicAmount(t).toFixed(2),
           'On Account': amountByMethod(t, 'Corporate Account').toFixed(2),
           Reference: transactionPayments(t).map((p) => p.reference || '').filter(Boolean).join('; '),
           'Billed To': t.corporateAccountName ?? '',
@@ -275,7 +299,7 @@ export function CashUp() {
   };
 
   const missingRefs = summary.momoRows.filter((t) =>
-    transactionPayments(t).some((p) => p.method === 'Mobile Money' && !p.reference)
+    transactionPayments(t).some((p) => requiresReference(p.method) && !p.reference)
   ).length;
 
   return (
@@ -337,7 +361,7 @@ export function CashUp() {
             </Card>
             <Card>
               <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                <CardTitle className="text-sm font-medium">Mobile Money</CardTitle>
+                <CardTitle className="text-sm font-medium">Mobile Money &amp; Transfers</CardTitle>
                 <Smartphone className="h-4 w-4 text-muted-foreground" />
               </CardHeader>
               <CardContent>
@@ -474,7 +498,7 @@ export function CashUp() {
                       <TableHead>Attendant</TableHead>
                       <TableHead className="text-right">Washes</TableHead>
                       <TableHead className="text-right">Cash</TableHead>
-                      <TableHead className="text-right">Mobile Money</TableHead>
+                      <TableHead className="text-right">Mobile &amp; Transfers</TableHead>
                       <TableHead className="text-right">Corporate</TableHead>
                     </TableRow>
                   </TableHeader>
@@ -504,8 +528,8 @@ export function CashUp() {
           {summary.momoRows.length > 0 && (
             <Card>
               <CardHeader>
-                <CardTitle>Mobile Money References</CardTitle>
-                <CardDescription>Tick these off against the MTN / Airtel / Zamtel statement.</CardDescription>
+                <CardTitle>Mobile Money &amp; Transfer References</CardTitle>
+                <CardDescription>Tick these off against the MTN / Airtel / Zamtel and bank statements.</CardDescription>
               </CardHeader>
               <CardContent>
                 <Table>
@@ -513,6 +537,7 @@ export function CashUp() {
                     <TableRow>
                       <TableHead>Time</TableHead>
                       <TableHead>Plate</TableHead>
+                      <TableHead>Method</TableHead>
                       <TableHead>Reference</TableHead>
                       <TableHead className="text-right">Amount</TableHead>
                     </TableRow>
@@ -524,14 +549,24 @@ export function CashUp() {
                           {new Date(t.timestamp).toLocaleTimeString('en-ZM', { hour: '2-digit', minute: '2-digit' })}
                         </TableCell>
                         <TableCell className="font-medium">{t.licensePlate}</TableCell>
+                        <TableCell className="text-sm">
+                          {[...new Set(transactionPayments(t).filter((p) => isElectronic(p.method)).map((p) => p.method))].join(', ')}
+                        </TableCell>
                         <TableCell className="font-mono text-xs">
                           {transactionPayments(t)
-                            .filter((p) => p.method === 'Mobile Money')
+                            .filter((p) => isElectronic(p.method))
                             .map((p) => p.reference)
                             .filter(Boolean)
-                            .join('; ') || <Badge variant="destructive">missing</Badge>}
+                            .join('; ') ||
+                            (transactionPayments(t).some((p) => requiresReference(p.method)) ? (
+                              <Badge variant="destructive">missing</Badge>
+                            ) : (
+                              '—'
+                            ))}
                         </TableCell>
-                        <TableCell className="text-right">{formatCurrency(t.totalAmount)}</TableCell>
+                        {/* The electronic PORTION, not the wash total: a split
+                            wash would otherwise overstate what the statement shows. */}
+                        <TableCell className="text-right">{formatCurrency(electronicAmount(t))}</TableCell>
                       </TableRow>
                     ))}
                   </TableBody>

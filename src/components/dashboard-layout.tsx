@@ -4,13 +4,18 @@ import React, { useEffect } from "react";
 import { useUser } from "@/firebase/auth/use-user";
 import { usePathname, useRouter } from "next/navigation";
 import {
+  BarChart2,
   Briefcase,
   Calculator,
   Car,
   Home,
   Loader2,
   LogOut,
+  MapPin,
+  ReceiptText,
+  Trophy,
   Users,
+  Wallet,
   Wrench,
   HardHat,
 } from "lucide-react";
@@ -32,8 +37,12 @@ import { SyncIndicator } from "./sync-indicator";
 
 const adminNav = [
   { href: "/admin", icon: Home, label: "Dashboard" },
+  { href: "/admin/reports", icon: BarChart2, label: "Reports" },
   { href: "/admin/cash-up", icon: Calculator, label: "Cash Up" },
+  { href: "/admin/banking", icon: ReceiptText, label: "Banking & Expenses" },
+  { href: "/admin/customers", icon: Trophy, label: "Customers" },
   { href: "/admin/corporate", icon: Briefcase, label: "Corporate" },
+  { href: "/admin/locations", icon: MapPin, label: "Locations" },
   { href: "/admin/services", icon: Wrench, label: "Services" },
   { href: "/admin/users", icon: Users, label: "Users" },
   { href: "/admin/washers", icon: Users, label: "Washers" },
@@ -42,6 +51,7 @@ const adminNav = [
 
 const attendantNav = [
   { href: "/dashboard", icon: Car, label: "New Wash" },
+  { href: "/dashboard/summary", icon: Wallet, label: "My Shift" },
 ];
 
 export function DashboardLayout({ children }: { children: React.ReactNode }) {
@@ -108,7 +118,10 @@ export function DashboardLayout({ children }: { children: React.ReactNode }) {
             </Avatar>
             <div className="flex flex-col overflow-hidden">
                 <span className="text-sm font-medium truncate">{user.profile?.name || user.email}</span>
-                <span className="text-xs text-sidebar-foreground/70 truncate">{user.profile?.role || 'User'}</span>
+                <span className="text-xs text-sidebar-foreground/70 truncate">
+                  {user.profile?.role || 'User'}
+                  {user.profile?.locationName ? ` · ${user.profile.locationName}` : ''}
+                </span>
             </div>
           </div>
           <SidebarMenuButton onClick={logout} >
@@ -121,6 +134,12 @@ export function DashboardLayout({ children }: { children: React.ReactNode }) {
         <header className="flex h-14 items-center justify-between border-b bg-background px-4 lg:px-6">
             <SidebarTrigger className="md:hidden" />
             <div className="flex items-center gap-4 ml-auto">
+              {user.profile?.locationName && (
+                <span className="flex min-w-0 items-center gap-1.5 text-sm text-muted-foreground">
+                  <MapPin className="h-4 w-4 shrink-0" />
+                  <span className="max-w-36 truncate sm:max-w-none">{user.profile.locationName}</span>
+                </span>
+              )}
               <SyncIndicator />
             </div>
         </header>

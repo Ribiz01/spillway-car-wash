@@ -10,6 +10,7 @@ import type { CashUp as CashUpRecord, Transaction } from '@/lib/types';
 import { formatCurrency, todayIso, startOfLocalDayIso, endOfLocalDayIso } from '@/lib/utils';
 import { amountByMethod } from '@/lib/payments';
 import { isActive, isRevenue } from '@/lib/transactions';
+import { inUserLocation } from '@/lib/locations';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -51,7 +52,8 @@ export function CashAvailable() {
   const { data: closed } = useDoc<CashUpRecord>(cashUpRef);
 
   const totals = useMemo(() => {
-    const rows = transactions ?? [];
+    // An attendant assigned to a branch counts that branch's drawer only.
+    const rows = (transactions ?? []).filter((t) => inUserLocation(t, user?.profile));
     // Cars still being washed have no payment yet and are not takings.
     const paid = rows.filter(isRevenue);
 
@@ -73,7 +75,7 @@ export function CashAvailable() {
         (t) => (t.completedByUid ?? t.userId) === user?.uid && cashOf(t) > 0
       ).length,
     };
-  }, [transactions, user?.uid]);
+  }, [transactions, user?.uid, user?.profile]);
 
   if (isLoading) {
     return <Skeleton className="h-[132px] w-full" />;
@@ -119,7 +121,7 @@ export function CashAvailable() {
         </div>
 
         <p className="text-xs text-muted-foreground">
-          This is physical cash only — mobile money and account washes are not included.
+          This is physical cash only — mobile money, transfers and account washes are not included.
           You took {formatCurrency(totals.mine)} of it across {totals.myCount} wash
           {totals.myCount === 1 ? '' : 'es'}.
         </p>
